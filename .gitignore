@@ -13,3 +13,4 @@ __pycache__/
 .system_generated/
 *.log
 scratch/
+push_to_github.bat
