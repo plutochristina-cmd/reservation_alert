@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>네이버 예약 알리미 - 빈자리 실시간 푸시 봇</title>
+  <meta name="description" content="네이버 예약의 취소표 및 최단 빈자리 슬롯을 자동으로 감지하여 스마트폰 잠금화면 푸시 알림으로 전송합니다.">
+  <meta name="theme-color" content="#03c75a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="예약알리미">
+
+  <!-- PWA Manifest & Icons -->
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app-container">
+    <!-- 1. Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="logo-badge" id="app-logo" style="background: linear-gradient(135deg, #03c75a 0%, #8b5cf6 100%);">⚡</div>
+        <div class="brand-text">
+          <h1>네이버 & 놀티켓 예약 알리미</h1>
+          <p>빈자리 & 취켓팅 실시간 감지 푸시</p>
+        </div>
+      </div>
+    </header>
+
+    <!-- 2. Push Notification Card -->
+    <section class="push-status-card" id="push-card">
+      <div class="push-info">
+        <div class="push-icon">🔔</div>
+        <div class="push-text">
+          <h3 id="push-card-title">스마트폰 푸시 알림</h3>
+          <p id="push-card-desc">빈자리 발생 시 휴대폰 잠금화면으로 즉시 알려드립니다.</p>
+        </div>
+      </div>
+      <button class="btn-push" id="btn-toggle-push">알림 켜기</button>
+    </section>
+
+    <!-- 3. iOS Safari Install Guide Banner (iPhone 접속 시 자동 표시) -->
+    <aside class="ios-banner" id="ios-banner" style="display: none;">
+      <div class="icon">💡</div>
+      <div>
+        <strong>아이폰 푸시 알림 안내:</strong> 사파리 하단의 <strong>공유 버튼(사각형에 화살표)</strong>을 누른 뒤 <strong>[홈 화면에 추가]</strong>를 해주시면 앱처럼 잠금화면 푸시 알림을 받으실 수 있습니다!
+      </div>
+    </aside>
+
+    <!-- 4. Add Section (Tabs: Live Search vs NOL Ticket vs URL) -->
+    <section class="add-section" id="add-section">
+      <!-- Mode Tabs -->
+      <div class="mode-tabs" role="tablist">
+        <button type="button" class="tab-btn active" id="tab-search" role="tab" aria-selected="true">
+          <span>🔍 네이버 검색</span>
+        </button>
+        <button type="button" class="tab-btn tab-btn-nol" id="tab-nol" role="tab" aria-selected="false">
+          <span>🎫 놀티켓 취켓팅</span>
+        </button>
+        <button type="button" class="tab-btn" id="tab-url" role="tab" aria-selected="false">
+          <span>🔗 링크 직접 입력</span>
+        </button>
+      </div>
+
+      <!-- Tab 1: Live Autocomplete Search Content -->
+      <div class="tab-content" id="content-search">
+        <div class="search-input-wrap">
+          <input 
+            type="text" 
+            id="search-input" 
+            class="search-input" 
+            placeholder="업체명 한두 글자만 입력 (예: 루시, 스시)" 
+            autocomplete="off"
+            spellcheck="false"
+          >
+          <span class="search-icon" id="search-spinner">🔍</span>
+          <button type="button" class="btn-clear-search" id="btn-clear-search" style="display: none;">✕</button>
+        </div>
+
+        <!-- Search Results Dropdown / Cards -->
+        <div class="search-results" id="search-results" style="display: none;"></div>
+
+        <!-- Selected Business & Item Picker -->
+        <div class="item-picker-card" id="item-picker-card" style="display: none;">
+          <div class="selected-biz-header">
+            <div class="selected-biz-info">
+              <span class="biz-badge" id="selected-biz-cat">카테고리</span>
+              <strong id="selected-biz-name">선택된 업체명</strong>
+            </div>
+            <button type="button" class="btn-reselect" id="btn-reselect">다시 선택</button>
+          </div>
+          <p class="selected-biz-addr" id="selected-biz-addr">주소 정보</p>
+
+          <div class="items-wrap" id="items-wrap">
+            <label class="items-label">예약 상품 선택:</label>
+            <div class="items-chips" id="items-chips"></div>
+          </div>
+
+          <!-- Date Range Box (Search Tab) -->
+          <div class="date-range-box" id="range-box-search">
+            <div class="range-header">
+              <span class="range-title">📅 감시 희망 기간 (From ~ To)</span>
+              <span class="range-badge" id="range-badge-search">1개월간 (추천)</span>
+            </div>
+            <div class="range-presets" id="presets-search">
+              <button type="button" class="preset-btn" data-days="7">1주일</button>
+              <button type="button" class="preset-btn active" data-days="30">1개월</button>
+              <button type="button" class="preset-btn" data-days="90">3개월</button>
+              <button type="button" class="preset-btn" data-days="365">1년 (전체)</button>
+              <button type="button" class="preset-btn" data-custom="true">직접 선택</button>
+            </div>
+            <div class="custom-date-inputs" id="custom-inputs-search" style="display: none;">
+              <div class="date-field">
+                <span class="date-label">시작</span>
+                <input type="date" id="start-date-search" class="date-input">
+              </div>
+              <span class="date-sep">~</span>
+              <div class="date-field">
+                <span class="date-label">종료</span>
+                <input type="date" id="end-date-search" class="date-input">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <button class="btn-submit" id="btn-submit-search" disabled type="button">
+          <span>+ 이 예약 모니터링 추가</span>
+        </button>
+      </div>
+
+      <!-- Tab 2: NOL Ticket Cancellation Content (Live Search Interface) -->
+      <div class="tab-content" id="content-nol" style="display: none;">
+        <div class="search-input-wrap">
+          <input 
+            type="text" 
+            id="nol-search-input" 
+            class="search-input" 
+            placeholder="공연명, 아티스트명 또는 상품번호 (예: 다이나믹, 지킬, 26013810)" 
+            autocomplete="off"
+            spellcheck="false"
+          >
+          <span class="search-icon" id="nol-search-spinner">🔍</span>
+          <button type="button" class="btn-clear-search" id="btn-clear-nol-search" style="display: none;">✕</button>
+        </div>
+
+        <!-- NOL Search Results Dropdown / Cards -->
+        <div class="search-results" id="nol-search-results" style="display: none;"></div>
+
+        <!-- Selected Concert Details & Session Picker Card -->
+        <div class="item-picker-card" id="nol-item-picker-card" style="display: none;">
+          <div class="selected-biz-header">
+            <div class="selected-biz-info">
+              <span class="biz-badge" style="background: linear-gradient(135deg, #8b5cf6, #6366f1);" id="selected-nol-cat">콘서트·뮤지컬</span>
+              <strong id="selected-nol-name">공연명</strong>
+            </div>
+            <button type="button" class="btn-reselect" id="btn-nol-reselect">다시 검색</button>
+          </div>
+          <p class="selected-biz-addr" id="selected-nol-venue">📍 공연장 정보</p>
+          <div class="preview-card" id="nol-preview-card" style="margin-top: 6px; background: rgba(139, 92, 246, 0.1); border-color: rgba(139, 92, 246, 0.3);"></div>
+
+          <div class="items-wrap" style="margin-top: 8px;">
+            <label class="items-label" id="nol-items-label">취소표 감시 희망 회차 선택:</label>
+            <div class="items-chips" id="nol-items-chips"></div>
+          </div>
+        </div>
+
+        <button class="btn-submit btn-submit-nol" id="btn-submit-nol" disabled type="button">
+          <span>+ 콘서트 취켓팅 모니터링 추가</span>
+        </button>
+      </div>
+
+      <!-- Tab 3: URL Direct Input Content -->
+      <div class="tab-content" id="content-url" style="display: none;">
+        <div class="input-group">
+          <input 
+            type="url" 
+            id="url-input" 
+            class="url-input" 
+            placeholder="네이버 예약 또는 놀티켓/인터파크 URL (https://...)" 
+            autocomplete="off"
+            spellcheck="false"
+          >
+          <button class="btn-paste" id="btn-paste" type="button">붙여넣기</button>
+        </div>
+
+        <!-- Live Preview Card -->
+        <div class="preview-card" id="preview-card" style="display: none;"></div>
+
+        <!-- URL Item / Doctor / Session Picker Card -->
+        <div class="item-picker-card" id="url-item-picker-card" style="display: none;">
+          <div class="items-wrap">
+            <label class="items-label" id="url-items-label">원장님 / 상세 항목 선택:</label>
+            <div class="items-chips" id="url-items-chips"></div>
+          </div>
+        </div>
+
+        <!-- Date Range Box (URL Tab) -->
+        <div class="date-range-box" id="range-box-url">
+          <div class="range-header">
+            <span class="range-title">📅 감시 희망 기간 (From ~ To)</span>
+            <span class="range-badge" id="range-badge-url">1개월간 (추천)</span>
+          </div>
+          <div class="range-presets" id="presets-url">
+            <button type="button" class="preset-btn" data-days="7">1주일</button>
+            <button type="button" class="preset-btn active" data-days="30">1개월</button>
+            <button type="button" class="preset-btn" data-days="90">3개월</button>
+            <button type="button" class="preset-btn" data-days="365">1년 (전체)</button>
+            <button type="button" class="preset-btn" data-custom="true">직접 선택</button>
+          </div>
+          <div class="custom-date-inputs" id="custom-inputs-url" style="display: none;">
+            <div class="date-field">
+              <span class="date-label">시작</span>
+              <input type="date" id="start-date-url" class="date-input">
+            </div>
+            <span class="date-sep">~</span>
+            <div class="date-field">
+              <span class="date-label">종료</span>
+              <input type="date" id="end-date-url" class="date-input">
+            </div>
+          </div>
+        </div>
+
+        <button class="btn-submit" id="btn-submit" disabled type="button">
+          <span>+ 예약 모니터링 추가</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- 5. Reservations List Section -->
+    <section class="list-section" id="list-section">
+      <div class="list-header">
+        <div class="section-title">
+          <span>📋</span>
+          <span>내 모니터링 목록</span>
+        </div>
+        <div class="list-meta-wrap">
+          <span class="cycle-indicator" title="클라우드 스케줄러가 매시간 정각마다 자동 스캔하여 빈자리 발생 시 즉시 푸시를 발송합니다.">
+            <span class="pulse-dot-green"></span>
+            <span>1시간 주기 갱신</span>
+          </span>
+          <span class="list-count" id="list-count">총 0개 등록됨</span>
+        </div>
+      </div>
+
+      <!-- Dynamic Cards Container -->
+      <div id="reservations-list"></div>
+
+      <!-- Empty State -->
+      <div class="empty-state" id="empty-state">
+        <div class="empty-icon">📭</div>
+        <div class="empty-title">등록된 예약이 없습니다</div>
+        <p class="empty-desc">위 입력창에 네이버 예약 링크를 붙여넣어 나만의 빈자리 알리미를 시작해 보세요.</p>
+      </div>
+    </section>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast" role="alert" aria-live="polite"></div>
+
+  <!-- Scripts -->
+  <script src="/app.js?v=3.0"></script>
+</body>
+</html>

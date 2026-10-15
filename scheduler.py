@@ -1,0 +1,407 @@
+"""
+다중 사용자 통합 백그라운드 스케줄러 (scheduler.py)
+- GitHub Actions에서 매시간 정각마다 실행
+- Supabase DB에 등록된 모든 사용자의 활성 네이버 예약 URL을 조회
+- 네이버 GraphQL API로 365일 치 스케줄을 고속 스캔하여 빈자리 감지
+- 새로운 빈자리 발견 시 해당 사용자의 스마트폰으로 Web Push(VAPID) 직접 발송
+- Supabase 미연결 시 로컬 단일 모니터링 모드(monitor.py)로 자동 폴백
+"""
+
+import os
+import sys
+import json
+import logging
+from datetime import datetime, timedelta
+import requests
+from dotenv import load_dotenv
+from pywebpush import webpush, WebPushException
+
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("MultiUserScheduler")
+
+# 암호화 보안 금고(vault) 모듈 임포트
+import vault
+
+# 환경변수 / 볼트에서 복호화하여 취득 (GitHub Actions 등 무인 클라우드 러너 폴백 포함)
+SUPABASE_URL = vault.get_secret("SUPABASE_URL", "https://hevkkauplkjfdwqjppmy.supabase.co").strip()
+SUPABASE_KEY = vault.get_secret("SUPABASE_SERVICE_ROLE_KEY", vault.get_secret("SUPABASE_ANON_KEY", "sb_publishable_CuWc_mAtXO2r7gxofe94Lg_E6Apy02A")).strip()
+
+VAPID_PRIVATE_KEY = vault.get_secret("VAPID_PRIVATE_KEY", "PBSoenIWJRdlY2YSY3lSsiFV43WGHdaRh6MRMz9094c").strip()
+VAPID_CLAIMS_SUB = vault.get_secret("VAPID_CLAIMS_SUB", "mailto:admin@example.com").strip()
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+GRAPHQL_ENDPOINT = "https://booking.naver.com/graphql"
+WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
+
+
+def format_slot_korean(dt: datetime, remain: int) -> str:
+    weekday = WEEKDAY_KR[dt.weekday()]
+    return f"{dt.strftime('%Y년 %m월 %d일')} ({weekday}) {dt.strftime('%H:%M')} (잔여: {remain}자리)"
+
+
+def fetch_hourly_schedule(biz_type_id: int, biz_id: str, item_id: str, start_dt: datetime, end_dt: datetime) -> list:
+    """네이버 GraphQL API를 통해 시간별 슬롯 데이터를 조회합니다."""
+    query = """
+    query hourlySchedule($scheduleParams: ScheduleParams) {
+      schedule(input: $scheduleParams) {
+        bizItemSchedule {
+          hourly {
+            unitStartTime
+            unitBookingCount
+            unitStock
+            isBusinessDay
+            isSaleDay
+            isUnitSaleDay
+            isUnitBusinessDay
+          }
+        }
+      }
+    }
+    """
+    variables = {
+        "scheduleParams": {
+            "businessTypeId": biz_type_id,
+            "businessId": biz_id,
+            "bizItemId": item_id,
+            "startDateTime": start_dt.strftime("%Y-%m-%dT00:00:00"),
+            "endDateTime": end_dt.strftime("%Y-%m-%dT23:59:59"),
+            "fixedTime": True,
+            "includesHolidaySchedules": True
+        }
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": f"https://booking.naver.com/booking/{biz_type_id}/bizes/{biz_id}/items/{item_id}",
+        "Origin": "https://booking.naver.com",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        resp = requests.post(GRAPHQL_ENDPOINT, headers=headers, json={"query": query, "variables": variables}, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json().get("data", {})
+            sched = data.get("schedule") if data else None
+            biz_sched = sched.get("bizItemSchedule") if sched else None
+            return (biz_sched.get("hourly") if biz_sched else []) or []
+    except Exception as e:
+        logger.error(f"GraphQL 요청 중 오류 ({biz_id}/{item_id}): {e}")
+    return []
+
+
+from urllib.parse import urlparse, parse_qs
+
+
+def parse_date_range_from_url(naver_url: str):
+    """네이버 예약 URL 쿼리스트링에서 startDate, endDate를 추출합니다."""
+    now = datetime.now()
+    default_end = now + timedelta(days=365)
+    try:
+        parsed = urlparse(naver_url)
+        params = parse_qs(parsed.query)
+        start_str = params.get("startDate", [None])[0]
+        end_str = params.get("endDate", [None])[0]
+
+        start_dt = datetime.strptime(start_str, "%Y-%m-%d") if start_str else now
+        end_dt = datetime.strptime(end_str, "%Y-%m-%d") if end_str else default_end
+
+        # 시작일이 과거인 경우 현재 시점으로 보정
+        start_dt = max(start_dt, now)
+        # 종료일은 당일 23:59:59까지 포함
+        end_dt = end_dt.replace(hour=23, minute=59, second=59)
+        return start_dt, end_dt
+    except Exception as e:
+        logger.debug(f"날짜 파싱 실패 (기본 365일 적용): {e}")
+        return now, default_end
+
+
+def scan_available_slots(biz_type_id: int, biz_id: str, item_id: str, start_dt: datetime = None, end_dt: datetime = None, max_results: int = 3) -> list:
+    """지정된 기간(start_dt ~ end_dt) 동안 예약 가능한 가장 빠른 슬롯을 검색합니다."""
+    now = datetime.now()
+    if start_dt is None:
+        start_dt = now
+    if end_dt is None:
+        end_dt = now + timedelta(days=365)
+
+    chunk_size = 60
+    current_start = max(now, start_dt)
+    end_limit = end_dt
+
+    all_available = []
+
+    while current_start < end_limit:
+        current_end = min(current_start + timedelta(days=chunk_size), end_limit)
+        slots = fetch_hourly_schedule(biz_type_id, biz_id, item_id, current_start, current_end)
+
+        for s in slots:
+            slot_str = s.get("unitStartTime")
+            if not slot_str:
+                continue
+            try:
+                slot_time = datetime.strptime(slot_str, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+
+            # 지정된 시작/종료 범위 및 현재 시점 필터링
+            if slot_time <= now or slot_time < start_dt or slot_time > end_dt:
+                continue
+
+            is_open = s.get("isBusinessDay") and s.get("isUnitBusinessDay") and s.get("isSaleDay") and s.get("isUnitSaleDay")
+            if not is_open:
+                continue
+
+            stock = s.get("unitStock") or 0
+            booked = s.get("unitBookingCount") or 0
+            remain = stock - booked
+
+            if remain > 0:
+                all_available.append({
+                    "datetime": slot_time,
+                    "datetime_str": slot_str,
+                    "remain_stock": remain,
+                    "korean_text": format_slot_korean(slot_time, remain)
+                })
+
+        current_start = current_end + timedelta(days=1)
+
+    all_available.sort(key=lambda x: x["datetime"])
+    return all_available[:max_results]
+
+
+
+def scan_nol_ticket_seats(goods_code: str, play_seq: str = "all") -> list:
+    """놀티켓 / 인터파크 티켓의 실시간 회차별 잔여석을 스캔합니다."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Referer": "https://nol.yanolja.com/",
+        "Accept": "application/json, text/plain, */*"
+    }
+    available = []
+
+    seqs_to_check = []
+    if play_seq and play_seq != "all":
+        seqs_to_check.append(play_seq)
+    else:
+        for i in range(1, 21):
+            seqs_to_check.append(f"{i:03d}")
+
+    for seq in seqs_to_check:
+        url = f"https://nol.yanolja.com/ticket/products/api/remaining-seats?goodsCode={goods_code}&playSeq={seq}"
+        try:
+            resp = requests.get(url, headers=headers, timeout=6)
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            seats = data.get("remainSeat", [])
+            if not seats:
+                if play_seq == "all":
+                    break
+                continue
+            for s in seats:
+                remain_cnt = s.get("remainCnt", 0)
+                if remain_cnt > 0:
+                    grade_name = s.get("seatGradeName", "좌석")
+                    available.append({
+                        "session": seq,
+                        "grade": grade_name,
+                        "remain_stock": remain_cnt,
+                        "korean_text": f"[{seq}회차] {grade_name} {remain_cnt}석 발생"
+                    })
+        except Exception as e:
+            logger.warning(f"놀티켓 조회 오류 ({goods_code}/{seq}): {e}")
+            break
+
+    return available
+
+
+def send_web_push(subscription_info: dict, title: str, body: str, url: str) -> bool:
+    """W3C VAPID 표준 Web Push를 통해 스마트폰 잠금화면으로 푸시 알림을 전송합니다."""
+    if not subscription_info or "endpoint" not in subscription_info:
+        logger.warning("푸시 구독 정보가 올바르지 않습니다.")
+        return False
+
+    payload = json.dumps({
+        "title": title,
+        "body": body,
+        "url": url,
+        "icon": "/icon-192.png",
+        "tag": "naver-slot-found"
+    })
+
+    try:
+        webpush(
+            subscription_info=subscription_info,
+            data=payload,
+            vapid_private_key=VAPID_PRIVATE_KEY,
+            vapid_claims={"sub": VAPID_CLAIMS_SUB}
+        )
+        logger.info(f"📱 스마트폰 Web Push 전송 성공! -> {subscription_info['endpoint'][:45]}...")
+        return True
+    except WebPushException as ex:
+        logger.error(f"❌ Web Push 전송 실패: {ex}")
+        if ex.response and ex.response.status_code in [404, 410]:
+            logger.info("ℹ️ 만료된 푸시 구독 토큰입니다.")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Web Push 발송 중 일반 예외: {e}")
+        return False
+
+
+def run_supabase_multi_user():
+    """Supabase에서 모든 활성 예약을 조회하여 개별 사용자 기기로 알림을 발송합니다."""
+    logger.info("🌐 [Supabase 연동 모드] 다중 사용자 예약 목록 로드 중...")
+    
+    # Supabase REST API로 active 예약과 기기 push_subscription 조회
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    url = f"{SUPABASE_URL}/rest/v1/reservations?select=id,device_id,naver_url,business_type_id,business_id,biz_item_id,biz_name,item_name,last_slots,devices(push_subscription)&is_active=eq.true"
+    
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            logger.error(f"Supabase 조회 실패 ({resp.status_code}): {resp.text}")
+            return
+        
+        reservations = resp.json()
+        logger.info(f"📋 총 {len(reservations)}개의 활성 예약 건을 모니터링합니다.")
+
+        for res in reservations:
+            res_id = res["id"]
+            biz_name = res["biz_name"]
+            item_name = res["item_name"]
+            biz_type = res["business_type_id"]
+            biz_id = res["business_id"]
+            item_id = res["biz_item_id"]
+            naver_url = res["naver_url"]
+            last_slots = res.get("last_slots") or []
+            device_info = res.get("devices") or {}
+            push_sub = device_info.get("push_subscription")
+
+            if biz_type == 99:
+                # 놀티켓 / 인터파크 콘서트 취켓팅 모니터링
+                logger.info(f"🔎 [놀티켓 취켓팅] 스캔 시작: [{biz_name}] - {item_name} (goodsCode: {biz_id})")
+                top_seats = scan_nol_ticket_seats(biz_id, item_id)
+                current_seat_keys = [s["korean_text"] for s in top_seats]
+                is_changed = (current_seat_keys != last_slots)
+
+                if top_seats and is_changed:
+                    logger.info(f"🎉 [놀티켓 취소표 발견!] [{biz_name}] {top_seats[0]['korean_text']}")
+                    title = f"🎫 [취소표 발생!] {biz_name}"
+                    body = f"{top_seats[0]['korean_text']}\n지금 즉시 예매하세요!"
+                    if len(top_seats) > 1:
+                        body += f"\n외 {len(top_seats)-1}개 좌석 오픈"
+
+                    if push_sub:
+                        send_web_push(push_sub, title, body, naver_url)
+                    else:
+                        logger.warning(f"⚠️ [{biz_name}] 푸시 구독 토큰이 등록되지 않은 기기입니다.")
+
+                    update_url = f"{SUPABASE_URL}/rest/v1/reservations?id=eq.{res_id}"
+                    requests.patch(update_url, headers=headers, json={
+                        "last_slots": current_seat_keys,
+                        "updated_at": datetime.now().isoformat()
+                    })
+                elif not top_seats:
+                    logger.info(f"❌ [놀티켓] [{biz_name}] 현재 잔여 취소표가 없습니다. (전석 매진)")
+                else:
+                    logger.info(f"ℹ️ [놀티켓] [{biz_name}] 이전 확인 시점과 동일합니다.")
+                continue
+
+            # 일반 네이버 예약 모니터링
+            start_dt, end_dt = parse_date_range_from_url(naver_url)
+            days_span = (end_dt - start_dt).days + 1
+            date_range_desc = f"{start_dt.strftime('%m/%d')}~{end_dt.strftime('%m/%d')} ({days_span}일간)"
+
+            logger.info(f"🔎 스캔 시작: [{biz_name}] - {item_name} (기간: {date_range_desc})")
+            top_slots = scan_available_slots(biz_type, biz_id, item_id, start_dt=start_dt, end_dt=end_dt, max_results=3)
+
+            current_slot_keys = [s["datetime_str"] for s in top_slots]
+            is_changed = (current_slot_keys != last_slots)
+
+            if top_slots and is_changed:
+                logger.info(f"🎉 [{biz_name}] 새로운 빈자리 발견! (최단: {top_slots[0]['datetime_str']})")
+                
+                # 1) 해당 사용자의 스마트폰으로 Web Push 전송
+                title = f"🔔 [{biz_name}] 빈자리 발견!"
+                body = f"가장 빠른 일정: {top_slots[0]['korean_text']}\n(희망기간: {date_range_desc})"
+                if len(top_slots) > 1:
+                    body += f"\n외 {len(top_slots)-1}개 슬롯 가능"
+
+                if push_sub:
+                    send_web_push(push_sub, title, body, naver_url)
+                else:
+                    logger.warning(f"⚠️ [{biz_name}] 푸시 구독 토큰이 등록되지 않은 기기입니다.")
+
+                # 2) Supabase last_slots 상태 업데이트
+                update_url = f"{SUPABASE_URL}/rest/v1/reservations?id=eq.{res_id}"
+                requests.patch(update_url, headers=headers, json={
+                    "last_slots": current_slot_keys,
+                    "updated_at": datetime.now().isoformat()
+                })
+            elif not top_slots:
+                logger.info(f"❌ [{biz_name}] 지정 기간({date_range_desc}) 내 빈자리가 없습니다.")
+            else:
+                logger.info(f"ℹ️ [{biz_name}] 이전 확인 시점과 최단 빈자리가 동일합니다. (중복 알림 방지)")
+
+    except Exception as e:
+        logger.error(f"다중 사용자 스케줄러 실행 중 오류: {e}")
+
+
+def main():
+    import argparse
+    import time
+
+    parser = argparse.ArgumentParser(description="네이버 예약 다중 사용자 자동 감지 스케줄러")
+    parser.add_argument("--daemon", "--loop", action="store_true", help="지정된 주기마다 무한 반복 실행하는 백그라운드 데몬 모드")
+    parser.add_argument("--interval", type=int, default=600, help="반복 주기 (초 단위, 기본값: 600초 / 10분)")
+    args = parser.parse_args()
+
+    if args.daemon:
+        logger.info(f"🔄 [데몬 모드 가동] {args.interval}초({args.interval // 60}분) 간격으로 지속 감시를 시작합니다. (중단: Ctrl+C)")
+        while True:
+            try:
+                if SUPABASE_URL and SUPABASE_KEY:
+                    run_supabase_multi_user()
+                else:
+                    logger.info("⚠️ SUPABASE_URL/KEY가 설정되지 않아 기본 단일 모니터링(monitor.py) 모드로 실행합니다.")
+                    import monitor
+                    monitor.main()
+            except KeyboardInterrupt:
+                logger.info("🛑 사용자에 의해 스케줄러가 중단되었습니다.")
+                break
+            except Exception as e:
+                logger.error(f"⚠️ 주기 실행 중 예외 발생: {e}")
+            
+            logger.info(f"⏳ 다음 감시 주기까지 {args.interval}초 대기 중...")
+            try:
+                time.sleep(args.interval)
+            except KeyboardInterrupt:
+                logger.info("🛑 사용자에 의해 스케줄러가 중단되었습니다.")
+                break
+    else:
+        if SUPABASE_URL and SUPABASE_KEY:
+            run_supabase_multi_user()
+        else:
+            logger.info("⚠️ SUPABASE_URL/KEY가 설정되지 않아 기본 단일 모니터링(monitor.py) 모드로 실행합니다.")
+            import monitor
+            monitor.main()
+
+
+if __name__ == "__main__":
+    main()
+

@@ -1,0 +1,22 @@
+{
+  "name": "네이버 예약 알리미",
+  "short_name": "예약알리미",
+  "description": "네이버 예약 빈자리 실시간 자동 감지 및 스마트폰 푸시 알림",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0f19",
+  "theme_color": "#03c75a",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

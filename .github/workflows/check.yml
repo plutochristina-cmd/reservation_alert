@@ -1,0 +1,53 @@
+name: Naver Booking Multi-User Monitor
+
+on:
+  schedule:
+    # 매시간 정각(00분) 자동 실행 (UTC 기준)
+    - cron: '0 * * * *'
+  # GitHub 웹 화면에서 수동으로 즉시 실행 가능
+  workflow_dispatch:
+    inputs:
+      force_notify:
+        description: '슬롯 변동 여부와 상관없이 알림 강제 발송 여부'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  check-all-reservations:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 파이썬 3.12 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 필수 패키지 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 이전 슬롯 상태 캐시 복원 (단일 사용자 폴백용)
+        uses: actions/cache@v4
+        with:
+          path: .last_state.json
+          key: reservation-state-${{ github.run_id }}
+          restore-keys: |
+            reservation-state-
+
+      - name: 다중 사용자 네이버 예약 스케줄러 실행
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_CLAIMS_SUB: ${{ secrets.VAPID_CLAIMS_SUB }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_ALWAYS: ${{ github.event.inputs.force_notify || 'false' }}
+        run: |
+          python scheduler.py

@@ -1,0 +1,15 @@
+# Security & Environment Variables (절대 Git에 커밋되지 않음)
+.env
+.env.*
+!.env.example
+.vercel/
+.secrets.vault
+
+# State & Cache
+.last_state.json
+__pycache__/
+*.pyc
+*.pyo
+.system_generated/
+*.log
+scratch/
