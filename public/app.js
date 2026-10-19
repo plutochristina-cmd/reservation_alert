@@ -310,7 +310,24 @@ async function loadReservations() {
     });
 
     if (resp.ok) {
-      return await resp.json();
+      const items = await resp.json();
+      try {
+        const uResp = await fetch(`${SUPABASE_URL}/rest/v1/reservations?select=id,updated_at`, {
+          headers: {
+            "apikey": SUPABASE_ANON_KEY,
+            "Authorization": `Bearer ${SUPABASE_ANON_KEY}`
+          }
+        });
+        if (uResp.ok) {
+          const uData = await uResp.json();
+          const uMap = {};
+          uData.forEach(u => { uMap[u.id] = u.updated_at; });
+          items.forEach(it => {
+            if (uMap[it.id]) it.updated_at = uMap[it.id];
+          });
+        }
+      } catch (err) {}
+      return items;
     }
   } catch (e) {
     console.error("예약 목록 로드 오류:", e);
@@ -501,6 +518,26 @@ function renderReservationCard(res) {
     ? `<span class="biz-badge" style="background: linear-gradient(135deg, #8b5cf6, #6366f1); margin-bottom: 4px; display: inline-block;">놀티켓·인터파크 취켓팅</span>`
     : `<span class="biz-badge" style="margin-bottom: 4px; display: inline-block;">네이버 예약</span>`;
 
+  let lastCheckedDesc = "";
+  if (res.updated_at) {
+    try {
+      const dt = new Date(res.updated_at);
+      const now = new Date();
+      const diffMin = Math.floor((now - dt) / 60000);
+      if (diffMin < 2) {
+        lastCheckedDesc = " · 최근 확인: 방금 전";
+      } else if (diffMin < 60) {
+        lastCheckedDesc = ` · 최근 확인: ${diffMin}분 전`;
+      } else {
+        const m = dt.getMonth() + 1;
+        const d = dt.getDate();
+        const h = String(dt.getHours()).padStart(2, '0');
+        const min = String(dt.getMinutes()).padStart(2, '0');
+        lastCheckedDesc = ` · 최근 확인: ${m}/${d} ${h}:${min}`;
+      }
+    } catch(e) {}
+  }
+
   card.innerHTML = `
     <div class="card-top">
       <div class="card-titles">
@@ -520,7 +557,7 @@ function renderReservationCard(res) {
     <div class="slot-badge-box">
       <div class="slot-label-row">
         <span class="slot-label">${isNol ? "실시간 취소표 잔여석 현황" : "가장 빠른 예약 가능 일시"}</span>
-        <span class="cycle-pill">⏱️ 1시간 주기 자동 감시 중</span>
+        <span class="cycle-pill">⏱️ 1시간 주기 자동 감시 중${lastCheckedDesc}</span>
       </div>
       <div class="slot-value" id="slot-text-${res.id}">
         ✨ ${lastSlotText}

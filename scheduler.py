@@ -11,10 +11,20 @@ import os
 import sys
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import requests
 from dotenv import load_dotenv
 from pywebpush import webpush, WebPushException
+
+# 한국 표준시(KST, UTC+9) 고정 정의 (GitHub Actions UTC 환경 대응)
+KST = timezone(timedelta(hours=9))
+
+def get_now_kst() -> datetime:
+    """한국 표준시(KST, UTC+9) 기준의 현재 시각(tz-naive)을 반환합니다.
+    GitHub Actions(Ubuntu UTC 환경)에서도 네이버 예약 시각과 9시간 오차 없이 정확히 일치하도록 보정합니다.
+    """
+    return datetime.now(KST).replace(tzinfo=None)
+
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -105,7 +115,7 @@ from urllib.parse import urlparse, parse_qs
 
 def parse_date_range_from_url(naver_url: str):
     """네이버 예약 URL 쿼리스트링에서 startDate, endDate를 추출합니다."""
-    now = datetime.now()
+    now = get_now_kst()
     default_end = now + timedelta(days=365)
     try:
         parsed = urlparse(naver_url)
@@ -128,7 +138,7 @@ def parse_date_range_from_url(naver_url: str):
 
 def scan_available_slots(biz_type_id: int, biz_id: str, item_id: str, start_dt: datetime = None, end_dt: datetime = None, max_results: int = 3) -> list:
     """지정된 기간(start_dt ~ end_dt) 동안 예약 가능한 가장 빠른 슬롯을 검색합니다."""
-    now = datetime.now()
+    now = get_now_kst()
     if start_dt is None:
         start_dt = now
     if end_dt is None:
@@ -261,6 +271,10 @@ def send_web_push(subscription_info: dict, title: str, body: str, url: str) -> b
 def run_supabase_multi_user():
     """Supabase에서 모든 활성 예약을 조회하여 개별 사용자 기기로 알림을 발송합니다."""
     logger.info("🌐 [Supabase 연동 모드] 다중 사용자 예약 목록 로드 중...")
+
+    force_notify = os.environ.get("NOTIFY_ALWAYS", "false").lower() in ["1", "true", "yes"] or "--force" in sys.argv
+    if force_notify:
+        logger.info("📢 알림 강제 전송 옵션(NOTIFY_ALWAYS=true / --force)이 활성화되었습니다.")
     
     # Supabase REST API로 active 예약과 기기 push_subscription 조회
     headers = {
@@ -291,6 +305,8 @@ def run_supabase_multi_user():
             last_slots = res.get("last_slots") or []
             device_info = res.get("devices") or {}
             push_sub = device_info.get("push_subscription")
+            now_iso = get_now_kst().isoformat()
+            update_url = f"{SUPABASE_URL}/rest/v1/reservations?id=eq.{res_id}"
 
             if biz_type == 99:
                 # 놀티켓 / 인터파크 콘서트 취켓팅 모니터링
@@ -299,7 +315,7 @@ def run_supabase_multi_user():
                 current_seat_keys = [s["korean_text"] for s in top_seats]
                 is_changed = (current_seat_keys != last_slots)
 
-                if top_seats and is_changed:
+                if top_seats and (is_changed or force_notify):
                     logger.info(f"🎉 [놀티켓 취소표 발견!] [{biz_name}] {top_seats[0]['korean_text']}")
                     title = f"🎫 [취소표 발생!] {biz_name}"
                     body = f"{top_seats[0]['korean_text']}\n지금 즉시 예매하세요!"
@@ -311,15 +327,22 @@ def run_supabase_multi_user():
                     else:
                         logger.warning(f"⚠️ [{biz_name}] 푸시 구독 토큰이 등록되지 않은 기기입니다.")
 
-                    update_url = f"{SUPABASE_URL}/rest/v1/reservations?id=eq.{res_id}"
                     requests.patch(update_url, headers=headers, json={
                         "last_slots": current_seat_keys,
-                        "updated_at": datetime.now().isoformat()
+                        "updated_at": now_iso
                     })
                 elif not top_seats:
                     logger.info(f"❌ [놀티켓] [{biz_name}] 현재 잔여 취소표가 없습니다. (전석 매진)")
+                    payload = {"updated_at": now_iso}
+                    if last_slots:
+                        logger.info(f"🔄 [놀티켓] [{biz_name}] 이전 슬롯이 매진되어 상태를 리셋합니다. (다음 취소표 발생 시 즉시 감지)")
+                        payload["last_slots"] = []
+                    requests.patch(update_url, headers=headers, json=payload)
                 else:
-                    logger.info(f"ℹ️ [놀티켓] [{biz_name}] 이전 확인 시점과 동일합니다.")
+                    logger.info(f"ℹ️ [놀티켓] [{biz_name}] 이전 확인 시점과 동일합니다. (중복 알림 방지)")
+                    requests.patch(update_url, headers=headers, json={
+                        "updated_at": now_iso
+                    })
                 continue
 
             # 일반 네이버 예약 모니터링
@@ -333,7 +356,7 @@ def run_supabase_multi_user():
             current_slot_keys = [s["datetime_str"] for s in top_slots]
             is_changed = (current_slot_keys != last_slots)
 
-            if top_slots and is_changed:
+            if top_slots and (is_changed or force_notify):
                 logger.info(f"🎉 [{biz_name}] 새로운 빈자리 발견! (최단: {top_slots[0]['datetime_str']})")
                 
                 # 1) 해당 사용자의 스마트폰으로 Web Push 전송
@@ -348,15 +371,22 @@ def run_supabase_multi_user():
                     logger.warning(f"⚠️ [{biz_name}] 푸시 구독 토큰이 등록되지 않은 기기입니다.")
 
                 # 2) Supabase last_slots 상태 업데이트
-                update_url = f"{SUPABASE_URL}/rest/v1/reservations?id=eq.{res_id}"
                 requests.patch(update_url, headers=headers, json={
                     "last_slots": current_slot_keys,
-                    "updated_at": datetime.now().isoformat()
+                    "updated_at": now_iso
                 })
             elif not top_slots:
                 logger.info(f"❌ [{biz_name}] 지정 기간({date_range_desc}) 내 빈자리가 없습니다.")
+                payload = {"updated_at": now_iso}
+                if last_slots:
+                    logger.info(f"🔄 [{biz_name}] 이전 슬롯이 마감되어 상태를 리셋합니다. (다음 취소표 발생 시 즉시 감지)")
+                    payload["last_slots"] = []
+                requests.patch(update_url, headers=headers, json=payload)
             else:
                 logger.info(f"ℹ️ [{biz_name}] 이전 확인 시점과 최단 빈자리가 동일합니다. (중복 알림 방지)")
+                requests.patch(update_url, headers=headers, json={
+                    "updated_at": now_iso
+                })
 
     except Exception as e:
         logger.error(f"다중 사용자 스케줄러 실행 중 오류: {e}")
