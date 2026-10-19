@@ -24,10 +24,10 @@
     <!-- 1. Header -->
     <header class="app-header">
       <div class="brand">
-        <div class="logo-badge" id="app-logo" style="background: linear-gradient(135deg, #03c75a 0%, #8b5cf6 100%);">⚡</div>
+        <div class="logo-badge" id="app-logo" style="background: linear-gradient(135deg, #03c75a 0%, #ff5238 50%, #8b5cf6 100%);">⚡</div>
         <div class="brand-text">
-          <h1>네이버 & 놀티켓 예약 알리미</h1>
-          <p>빈자리 & 취켓팅 실시간 감지 푸시</p>
+          <h1>예약 & 티켓팅 통합 알리미</h1>
+          <p>네이버 · 캐치테이블 · 놀티켓 실시간 빈자리 푸시</p>
         </div>
       </div>
     </header>
@@ -52,12 +52,30 @@
       </div>
     </aside>
 
-    <!-- 4. Add Section (Tabs: Live Search vs NOL Ticket vs URL) -->
+    <!-- 3-2. Shared Link / Clipboard Auto-Detection Banner -->
+    <aside class="share-detect-banner" id="share-detect-banner" style="display: none;">
+      <div class="share-detect-left">
+        <span class="share-detect-icon">⚡</span>
+        <div class="share-detect-info">
+          <strong id="share-detect-title">공유된 링크 감지</strong>
+          <p id="share-detect-url">URL</p>
+        </div>
+      </div>
+      <div class="share-detect-actions">
+        <button type="button" class="btn-share-apply" id="btn-share-apply">바로 조회</button>
+        <button type="button" class="btn-share-dismiss" id="btn-share-dismiss" title="닫기">✕</button>
+      </div>
+    </aside>
+
+    <!-- 4. Add Section (Tabs: Live Search vs CatchTable vs NOL Ticket vs URL) -->
     <section class="add-section" id="add-section">
       <!-- Mode Tabs -->
       <div class="mode-tabs" role="tablist">
         <button type="button" class="tab-btn active" id="tab-search" role="tab" aria-selected="true">
           <span>🔍 네이버 검색</span>
+        </button>
+        <button type="button" class="tab-btn tab-btn-ct" id="tab-ct" role="tab" aria-selected="false">
+          <span>🍽️ 캐치테이블</span>
         </button>
         <button type="button" class="tab-btn tab-btn-nol" id="tab-nol" role="tab" aria-selected="false">
           <span>🎫 놀티켓 취켓팅</span>
@@ -133,7 +151,48 @@
         </button>
       </div>
 
-      <!-- Tab 2: NOL Ticket Cancellation Content (Live Search Interface) -->
+      <!-- Tab 2: CatchTable Real-time Search & Direct Booking Content -->
+      <div class="tab-content" id="content-ct" style="display: none;">
+        <div class="search-input-wrap">
+          <input 
+            type="text" 
+            id="ct-search-input" 
+            class="search-input" 
+            placeholder="캐치테이블 식당명, 영문 ID 또는 링크 (예: sushikoji, 정식당)" 
+            autocomplete="off"
+            spellcheck="false"
+          >
+          <span class="search-icon" id="ct-search-spinner">🔍</span>
+          <button type="button" class="btn-clear-search" id="btn-clear-ct-search" style="display: none;">✕</button>
+        </div>
+
+        <!-- CatchTable Search Results Dropdown / Cards -->
+        <div class="search-results" id="ct-search-results" style="display: none;"></div>
+
+        <!-- Selected Restaurant Details & Slots Picker Card -->
+        <div class="item-picker-card" id="ct-item-picker-card" style="display: none;">
+          <div class="selected-biz-header">
+            <div class="selected-biz-info">
+              <span class="biz-badge" style="background: linear-gradient(135deg, #ff5238, #ff7a59);" id="selected-ct-cat">캐치테이블</span>
+              <strong id="selected-ct-name">식당명</strong>
+            </div>
+            <button type="button" class="btn-reselect" id="btn-ct-reselect">다시 검색</button>
+          </div>
+          <p class="selected-biz-addr" id="selected-ct-addr">📍 주소 정보</p>
+          <div class="preview-card" id="ct-preview-card" style="margin-top: 6px; background: rgba(255, 82, 56, 0.1); border-color: rgba(255, 82, 56, 0.3);"></div>
+
+          <div class="items-wrap" style="margin-top: 8px;">
+            <label class="items-label" id="ct-items-label">실시간 예약 가능 날짜 현황:</label>
+            <div class="items-chips" id="ct-items-chips"></div>
+          </div>
+        </div>
+
+        <button class="btn-submit btn-submit-ct" id="btn-submit-ct" disabled type="button">
+          <span>+ 캐치테이블 빈자리 모니터링 추가</span>
+        </button>
+      </div>
+
+      <!-- Tab 3: NOL Ticket Cancellation Content (Live Search Interface) -->
       <div class="tab-content" id="content-nol" style="display: none;">
         <div class="search-input-wrap">
           <input 
@@ -163,6 +222,16 @@
           <p class="selected-biz-addr" id="selected-nol-venue">📍 공연장 정보</p>
           <div class="preview-card" id="nol-preview-card" style="margin-top: 6px; background: rgba(139, 92, 246, 0.1); border-color: rgba(139, 92, 246, 0.3);"></div>
 
+          <!-- Cast Selection Container (1~2 Actors) -->
+          <div class="cast-section" id="nol-cast-section" style="display: none;">
+            <div class="cast-header">
+              <span class="cast-title">🎭 선호 출연진 (배우 1~2명 선택)</span>
+              <span class="cast-count-badge" id="nol-cast-count-badge">0/2명 선택</span>
+            </div>
+            <p class="cast-desc">선호하는 배우를 선택하시면 해당 캐스트 일정을 우선 감시합니다. (최대 2명)</p>
+            <div class="cast-chips-grid" id="nol-cast-chips"></div>
+          </div>
+
           <div class="items-wrap" style="margin-top: 8px;">
             <label class="items-label" id="nol-items-label">취소표 감시 희망 회차 선택:</label>
             <div class="items-chips" id="nol-items-chips"></div>
@@ -174,14 +243,14 @@
         </button>
       </div>
 
-      <!-- Tab 3: URL Direct Input Content -->
+      <!-- Tab 4: URL Direct Input Content -->
       <div class="tab-content" id="content-url" style="display: none;">
         <div class="input-group">
           <input 
             type="url" 
             id="url-input" 
             class="url-input" 
-            placeholder="네이버 예약 또는 놀티켓/인터파크 URL (https://...)" 
+            placeholder="네이버, 캐치테이블 또는 놀티켓 URL (https://...)" 
             autocomplete="off"
             spellcheck="false"
           >

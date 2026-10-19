@@ -156,7 +156,22 @@ function updatePushUI(state) {
 function parseAnyBookingUrl(urlStr) {
   if (!urlStr) return null;
 
-  // 1) 놀티켓 / 인터파크 티켓 콘서트 (예: https://nol.yanolja.com/ticket/products/26013810)
+  // 1) 캐치테이블 식당 (예: https://app.catchtable.co.kr/ct/shop/sushikoji 또는 https://catchtable.co.kr/sushikoji)
+  const mCt = urlStr.match(/catchtable\.co\.kr\/(?:ct\/shop\/)?([a-zA-Z0-9_\-]+)/);
+  if (mCt) {
+    const alias = mCt[1];
+    return {
+      platform: "catchtable",
+      type: 88,
+      shopRef: alias,
+      businessId: alias,
+      bizItemId: "all",
+      bizName: "",
+      itemName: "전체 예약 일정 (빈자리 감시)"
+    };
+  }
+
+  // 2) 놀티켓 / 인터파크 티켓 콘서트 (예: https://nol.yanolja.com/ticket/products/26013810)
   const mNol = urlStr.match(/nol\.yanolja\.com\/ticket\/products\/(\d+)/) ||
                urlStr.match(/tickets?\.interpark\.com\/(?:goods\/|contents\/goods\/)?(\d+)/);
   if (mNol) {
@@ -171,7 +186,7 @@ function parseAnyBookingUrl(urlStr) {
     };
   }
 
-  // 2) 네이버 예약: /booking/{type}/bizes/{bizId}/items/{itemId}
+  // 3) 네이버 예약: /booking/{type}/bizes/{bizId}/items/{itemId}
   const m1 = urlStr.match(/\/booking\/(\d+)\/bizes\/(\d+)\/items\/(\d+)/);
   if (m1) {
     return {
@@ -182,7 +197,7 @@ function parseAnyBookingUrl(urlStr) {
     };
   }
 
-  // 3) 네이버 예약: /booking/{type}/bizes/{bizId} (단일 비즈니스, 상세 항목 미포함)
+  // 4) 네이버 예약: /booking/{type}/bizes/{bizId} (단일 비즈니스, 상세 항목 미포함)
   const m2 = urlStr.match(/\/booking\/(\d+)\/bizes\/(\d+)/);
   if (m2) {
     return {
@@ -193,7 +208,7 @@ function parseAnyBookingUrl(urlStr) {
     };
   }
 
-  // 4) 네이버 플레이스: /hospital/{id} 또는 /place/{id}
+  // 5) 네이버 플레이스: /hospital/{id} 또는 /place/{id}
   const m3 = urlStr.match(/place\.naver\.com\/(?:hospital|place|restaurant)\/(\d+)/);
   if (m3) {
     return {
@@ -208,6 +223,42 @@ function parseAnyBookingUrl(urlStr) {
 }
 
 async function fetchPreviewInfo(parsed) {
+  if (parsed.platform === "catchtable") {
+    try {
+      const resp = await fetch(`${API_BASE_URL}/api/catchtable?alias=${encodeURIComponent(parsed.shopRef)}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        let slotDates = [];
+        const shopRef = data.shopRef || parsed.shopRef;
+        if (shopRef) {
+          const sResp = await fetch(`${API_BASE_URL}/api/catchtable?shopRef=${encodeURIComponent(shopRef)}&action=slots`);
+          if (sResp.ok) {
+            const sData = await sResp.json();
+            slotDates = sData.availableDates || [];
+          }
+        }
+        return {
+          platform: "catchtable",
+          bizName: data.shopName || `캐치테이블 (${parsed.shopRef})`,
+          address: data.address || "",
+          category: data.category || "식당",
+          shopRef: shopRef,
+          availableDates: slotDates
+        };
+      }
+    } catch (e) {
+      console.warn("캐치테이블 정보 조회 실패:", e);
+    }
+    return {
+      platform: "catchtable",
+      bizName: `캐치테이블 (${parsed.shopRef})`,
+      address: "",
+      category: "식당",
+      shopRef: parsed.shopRef,
+      availableDates: []
+    };
+  }
+
   if (parsed.platform === "nol_ticket") {
     try {
       const resp = await fetch(`${API_BASE_URL}/api/nol?goodsCode=${encodeURIComponent(parsed.goodsCode)}`);
@@ -217,6 +268,7 @@ async function fetchPreviewInfo(parsed) {
           platform: "nol_ticket",
           bizName: data.goodsName || `놀티켓 콘서트 (#${parsed.goodsCode})`,
           venue: data.placeName || "공연장",
+          casts: data.casts || [],
           sessions: data.sessions || []
         };
       }
@@ -227,6 +279,7 @@ async function fetchPreviewInfo(parsed) {
       platform: "nol_ticket",
       bizName: `놀티켓 콘서트 (#${parsed.goodsCode})`,
       venue: "공연장 정보 확인 중",
+      casts: [],
       sessions: []
     };
   }
@@ -492,16 +545,21 @@ function renderReservationCard(res) {
   card.id = `card-${res.id}`;
 
   const isNol = (res.business_type_id === 99);
+  const isCatchTable = (res.business_type_id === 88);
 
   const lastSlotText = res.last_slots && res.last_slots.length > 0 
     ? res.last_slots[0] 
-    : (isNol ? "실시간 취켓팅 감시 대기 중" : "아직 확인 전 (스케줄러 대기 중)");
+    : (isCatchTable ? "캐치테이블 빈자리 감시 대기 중" : (isNol ? "실시간 취켓팅 감시 대기 중" : "아직 확인 전 (스케줄러 대기 중)"));
 
   // URL에서 startDate, endDate 추출
   let periodBadgeHtml = "";
   let sDate = null;
   let eDate = null;
-  if (!isNol) {
+  if (isCatchTable) {
+    periodBadgeHtml = `<div class="card-period-badge" style="color: #ff7a59; border-color: rgba(255, 82, 56, 0.3);">🍽️ 실시간 빈자리 예약 감시 중</div>`;
+  } else if (isNol) {
+    periodBadgeHtml = `<div class="card-period-badge" style="color: #a78bfa; border-color: rgba(167, 139, 250, 0.3);">🎫 취소표 실시간 고속 감시 중</div>`;
+  } else {
     try {
       const u = new URL(res.naver_url);
       sDate = u.searchParams.get("startDate");
@@ -510,13 +568,26 @@ function renderReservationCard(res) {
         periodBadgeHtml = `<div class="card-period-badge">📅 감시 기간: ${sDate} ~ ${eDate}</div>`;
       }
     } catch (e) {}
-  } else {
-    periodBadgeHtml = `<div class="card-period-badge" style="color: #a78bfa; border-color: rgba(167, 139, 250, 0.3);">🎫 취소표 실시간 고속 감시 중</div>`;
   }
 
-  const platformBadge = isNol 
-    ? `<span class="biz-badge" style="background: linear-gradient(135deg, #8b5cf6, #6366f1); margin-bottom: 4px; display: inline-block;">놀티켓·인터파크 취켓팅</span>`
-    : `<span class="biz-badge" style="margin-bottom: 4px; display: inline-block;">네이버 예약</span>`;
+  // 캐스트 뱃지 추출 (예: "[캐스트: 김준수, 정원영] 1회차")
+  let castBadgesHtml = "";
+  if (res.item_name && res.item_name.includes("[캐스트:")) {
+    const m = res.item_name.match(/\[캐스트:\s*([^\]]+)\]/);
+    if (m) {
+      const actors = m[1].split(",").map(a => a.trim()).filter(Boolean);
+      castBadgesHtml = `<div style="margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px;">` +
+        actors.map(a => `<span class="cast-badge">🎭 ${a}</span>`).join("") +
+        `</div>`;
+    }
+  }
+
+  let platformBadge = `<span class="biz-badge" style="margin-bottom: 4px; display: inline-block;">네이버 예약</span>`;
+  if (isCatchTable) {
+    platformBadge = `<span class="biz-badge" style="background: linear-gradient(135deg, #ff5238, #ff7a59); margin-bottom: 4px; display: inline-block;">🍽️ 캐치테이블</span>`;
+  } else if (isNol) {
+    platformBadge = `<span class="biz-badge" style="background: linear-gradient(135deg, #8b5cf6, #6366f1); margin-bottom: 4px; display: inline-block;">🎫 놀티켓·인터파크 취켓팅</span>`;
+  }
 
   let lastCheckedDesc = "";
   if (res.updated_at) {
@@ -538,12 +609,23 @@ function renderReservationCard(res) {
     } catch(e) {}
   }
 
+  let openLinkText = "네이버 예약 열기";
+  let openLinkStyle = "";
+  if (isCatchTable) {
+    openLinkText = "캐치테이블 예약 열기";
+    openLinkStyle = "border-color: rgba(255, 82, 56, 0.4); color: #ff7a59;";
+  } else if (isNol) {
+    openLinkText = "티켓 예매창 열기";
+    openLinkStyle = "border-color: rgba(167, 139, 250, 0.4); color: #c4b5fd;";
+  }
+
   card.innerHTML = `
     <div class="card-top">
       <div class="card-titles">
         ${platformBadge}
         <h4>${res.biz_name}</h4>
         <p>${res.item_name}</p>
+        ${castBadgesHtml}
         ${periodBadgeHtml}
       </div>
       <div class="switch-container">
@@ -556,7 +638,7 @@ function renderReservationCard(res) {
     
     <div class="slot-badge-box">
       <div class="slot-label-row">
-        <span class="slot-label">${isNol ? "실시간 취소표 잔여석 현황" : "가장 빠른 예약 가능 일시"}</span>
+        <span class="slot-label">${isCatchTable ? "캐치테이블 실시간 예약 가능 일자" : (isNol ? "실시간 취소표 잔여석 현황" : "가장 빠른 예약 가능 일시")}</span>
         <span class="cycle-pill">⏱️ 1시간 주기 자동 감시 중${lastCheckedDesc}</span>
       </div>
       <div class="slot-value" id="slot-text-${res.id}">
@@ -565,8 +647,8 @@ function renderReservationCard(res) {
     </div>
 
     <div class="card-bottom">
-      <a href="${res.naver_url}" target="_blank" rel="noopener noreferrer" class="btn-open-naver" style="${isNol ? 'border-color: rgba(167, 139, 250, 0.4); color: #c4b5fd;' : ''}">
-        <span>${isNol ? "티켓 예매창 열기" : "네이버 예약 열기"}</span> ↗
+      <a href="${res.naver_url}" target="_blank" rel="noopener noreferrer" class="btn-open-naver" style="${openLinkStyle}">
+        <span>${openLinkText}</span> ↗
       </a>
       <div class="card-actions">
         <button class="btn-check-now" id="check-btn-${res.id}">지금 확인</button>
@@ -595,6 +677,35 @@ function renderReservationCard(res) {
     btn.disabled = true;
     btn.textContent = "조회 중...";
     showToast(`⏳ '${res.biz_name}' 실시간 스캔 중...`);
+
+    if (isCatchTable) {
+      // 캐치테이블 실시간 조회
+      try {
+        const resp = await fetch(`${API_BASE_URL}/api/catchtable?shopRef=${encodeURIComponent(res.business_id)}&action=slots`);
+        const data = await resp.json();
+        const avail = data.availableDates || [];
+        const slotBox = card.querySelector(`#slot-text-${res.id}`);
+        if (avail.length > 0) {
+          const first = avail[0];
+          const pCounts = first.availablePersonCounts || [];
+          const pText = pCounts.length ? `(가능: ${Math.min(...pCounts)}~${Math.max(...pCounts)}명)` : '';
+          const extraText = avail.length > 1 ? ` 외 ${avail.length - 1}개 날짜 오픈` : '';
+          slotBox.textContent = `🎉 ${first.date} ${pText}${extraText}`;
+          slotBox.classList.remove("none");
+          showToast(`🎉 캐치테이블 ${avail.length}개 예약 가능 날짜 발견!`);
+        } else {
+          slotBox.textContent = `❌ 현재 예약 가능한 일정이 없습니다.`;
+          slotBox.classList.add("none");
+          showToast(`ℹ️ 현재 전 일정 마감 상태입니다. 빈자리 발생 시 알림이 발송됩니다.`);
+        }
+      } catch (err) {
+        showToast("❌ 조회 실패: " + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "지금 확인";
+      }
+      return;
+    }
 
     if (isNol) {
       // 놀티켓/인터파크 실시간 조회
@@ -812,30 +923,306 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("btn-toggle-push").addEventListener("click", requestPushPermission);
 
   // -------------------------------------------------------------------------
-  // A. 모드 전환 탭 (네이버 검색 vs 놀티켓 취켓팅 vs URL 직접입력)
+  // A. 모드 전환 탭 (네이버 검색 vs 캐치테이블 vs 놀티켓 취켓팅 vs URL 직접입력)
   // -------------------------------------------------------------------------
   const tabSearch = document.getElementById("tab-search");
+  const tabCt = document.getElementById("tab-ct");
   const tabNol = document.getElementById("tab-nol");
   const tabUrl = document.getElementById("tab-url");
   const contentSearch = document.getElementById("content-search");
+  const contentCt = document.getElementById("content-ct");
   const contentNol = document.getElementById("content-nol");
   const contentUrl = document.getElementById("content-url");
 
   function switchTab(activeTab) {
-    const tabs = [tabSearch, tabNol, tabUrl].filter(Boolean);
+    const tabs = [tabSearch, tabCt, tabNol, tabUrl].filter(Boolean);
     tabs.forEach(t => {
       const isActive = (t === activeTab);
       t.classList.toggle("active", isActive);
       t.setAttribute("aria-selected", isActive ? "true" : "false");
     });
     if (contentSearch) contentSearch.style.display = (activeTab === tabSearch ? "flex" : "none");
+    if (contentCt) contentCt.style.display = (activeTab === tabCt ? "flex" : "none");
     if (contentNol) contentNol.style.display = (activeTab === tabNol ? "flex" : "none");
     if (contentUrl) contentUrl.style.display = (activeTab === tabUrl ? "flex" : "none");
   }
 
   if (tabSearch) tabSearch.addEventListener("click", () => switchTab(tabSearch));
+  if (tabCt) tabCt.addEventListener("click", () => switchTab(tabCt));
   if (tabNol) tabNol.addEventListener("click", () => switchTab(tabNol));
   if (tabUrl) tabUrl.addEventListener("click", () => switchTab(tabUrl));
+
+  // -------------------------------------------------------------------------
+  // A-1. 캐치테이블 실시간 검색 & 매장 선택 컨트롤러
+  // -------------------------------------------------------------------------
+  let selectedCtTarget = null;
+  let ctSearchDebounceTimer = null;
+  const ctSearchInput = document.getElementById("ct-search-input");
+  const ctSearchSpinner = document.getElementById("ct-search-spinner");
+  const btnClearCtSearch = document.getElementById("btn-clear-ct-search");
+  const ctSearchResults = document.getElementById("ct-search-results");
+  const ctItemPickerCard = document.getElementById("ct-item-picker-card");
+  const selectedCtCat = document.getElementById("selected-ct-cat");
+  const selectedCtName = document.getElementById("selected-ct-name");
+  const selectedCtAddr = document.getElementById("selected-ct-addr");
+  const btnCtReselect = document.getElementById("btn-ct-reselect");
+  const ctPreviewCard = document.getElementById("ct-preview-card");
+  const ctItemsChips = document.getElementById("ct-items-chips");
+  const btnSubmitCt = document.getElementById("btn-submit-ct");
+
+  if (ctSearchInput) {
+    ctSearchInput.addEventListener("input", (e) => {
+      const val = e.target.value.trim();
+      if (btnClearCtSearch) btnClearCtSearch.style.display = val ? "flex" : "none";
+
+      clearTimeout(ctSearchDebounceTimer);
+      if (!val) {
+        if (ctSearchResults) {
+          ctSearchResults.style.display = "none";
+          ctSearchResults.innerHTML = "";
+        }
+        return;
+      }
+
+      ctSearchDebounceTimer = setTimeout(() => {
+        performCtSearch(val);
+      }, 280);
+    });
+  }
+
+  if (btnClearCtSearch) {
+    btnClearCtSearch.addEventListener("click", () => {
+      if (ctSearchInput) {
+        ctSearchInput.value = "";
+        ctSearchInput.focus();
+      }
+      btnClearCtSearch.style.display = "none";
+      if (ctSearchResults) {
+        ctSearchResults.style.display = "none";
+        ctSearchResults.innerHTML = "";
+      }
+    });
+  }
+
+  if (btnCtReselect) {
+    btnCtReselect.addEventListener("click", () => {
+      selectedCtTarget = null;
+      if (ctItemPickerCard) ctItemPickerCard.style.display = "none";
+      if (btnSubmitCt) btnSubmitCt.disabled = true;
+      if (ctSearchInput) {
+        ctSearchInput.value = "";
+        ctSearchInput.focus();
+      }
+      if (btnClearCtSearch) btnClearCtSearch.style.display = "none";
+      if (ctSearchResults) {
+        ctSearchResults.style.display = "none";
+        ctSearchResults.innerHTML = "";
+      }
+    });
+  }
+
+  async function performCtSearch(query) {
+    if (ctSearchSpinner) {
+      ctSearchSpinner.textContent = "⏳";
+      ctSearchSpinner.classList.add("spin");
+    }
+
+    try {
+      // URL 또는 영문 alias가 입력된 경우 -> alias 단일 조회
+      const mUrl = query.match(/catchtable\.co\.kr\/(?:ct\/shop\/)?([a-zA-Z0-9_\-]+)/);
+      const isDirectAlias = mUrl || /^[a-zA-Z0-9_\-]+$/.test(query);
+      const targetAlias = mUrl ? mUrl[1] : (isDirectAlias ? query : null);
+
+      if (targetAlias && targetAlias.length >= 3) {
+        const resp = await fetch(`${API_BASE_URL}/api/catchtable?alias=${encodeURIComponent(targetAlias)}`);
+        const data = await resp.json();
+        if (data.ok && data.shopName) {
+          renderCtSearchResults([{
+            shopRef: data.shopRef || targetAlias,
+            shopName: data.shopName,
+            shopUrl: data.shopUrl || targetAlias,
+            category: data.category || '캐치테이블 식당',
+            address: data.address || ''
+          }], query);
+          return;
+        }
+      }
+
+      // 키워드 검색
+      const resp = await fetch(`${API_BASE_URL}/api/catchtable?q=${encodeURIComponent(query)}`);
+      const data = await resp.json();
+      const list = data.results || [];
+      renderCtSearchResults(list, query);
+    } catch (err) {
+      console.error("캐치테이블 검색 요청 오류:", err);
+      if (ctSearchResults) {
+        ctSearchResults.style.display = "flex";
+        ctSearchResults.innerHTML = `<div class="search-item-empty">검색 중 오류가 발생했습니다: ${err.message}</div>`;
+      }
+    } finally {
+      if (ctSearchSpinner) {
+        ctSearchSpinner.textContent = "🔍";
+        ctSearchSpinner.classList.remove("spin");
+      }
+    }
+  }
+
+  function renderCtSearchResults(shops, query) {
+    if (!ctSearchResults) return;
+    ctSearchResults.innerHTML = "";
+
+    if (shops.length === 0) {
+      ctSearchResults.style.display = "flex";
+      ctSearchResults.innerHTML = `<div class="search-item-empty">'${query}'에 대한 캐치테이블 매장 결과가 없습니다. 식당 영문 ID(예: sushikoji)나 공유 링크를 직접 입력해 보세요.</div>`;
+      return;
+    }
+
+    shops.forEach(shop => {
+      const itemEl = document.createElement("div");
+      itemEl.className = "search-item";
+      itemEl.innerHTML = `
+        <div class="search-item-top">
+          <span class="search-item-title">${shop.shopName}</span>
+          ${shop.category ? `<span class="search-item-cat" style="background: rgba(255, 82, 56, 0.2); color: #ff7a59;">${shop.category}</span>` : ""}
+        </div>
+        ${shop.address ? `<span class="search-item-addr">📍 ${shop.address}</span>` : ''}
+      `;
+
+      itemEl.addEventListener("click", () => {
+        handleShopSelected(shop);
+      });
+
+      ctSearchResults.appendChild(itemEl);
+    });
+
+    ctSearchResults.style.display = "flex";
+  }
+
+  async function handleShopSelected(shop) {
+    if (ctSearchResults) ctSearchResults.style.display = "none";
+    if (ctSearchInput) ctSearchInput.value = shop.shopName;
+    if (btnClearCtSearch) btnClearCtSearch.style.display = "flex";
+
+    if (selectedCtName) selectedCtName.textContent = shop.shopName;
+    if (selectedCtCat) selectedCtCat.textContent = shop.category || "캐치테이블";
+    if (selectedCtAddr) selectedCtAddr.textContent = shop.address ? `📍 ${shop.address}` : "";
+    if (ctPreviewCard) {
+      ctPreviewCard.style.display = "flex";
+      ctPreviewCard.innerHTML = `<span style="color: #ff7a59;">⏳ 실시간 예약 가능 날짜 조회 중...</span>`;
+    }
+    if (ctItemsChips) ctItemsChips.innerHTML = `<span>⏳ 슬롯 로딩 중...</span>`;
+    if (ctItemPickerCard) ctItemPickerCard.style.display = "flex";
+    if (btnSubmitCt) btnSubmitCt.disabled = true;
+
+    try {
+      const shopRef = shop.shopRef || shop.shopUrl;
+      const resp = await fetch(`${API_BASE_URL}/api/catchtable?shopRef=${encodeURIComponent(shopRef)}&action=slots`);
+      const data = await resp.json();
+      const avail = data.availableDates || [];
+
+      selectedCtTarget = {
+        platform: "catchtable",
+        shopRef: shopRef,
+        shopName: shop.shopName,
+        shopUrl: shop.shopUrl || shopRef,
+        address: shop.address || "",
+        category: shop.category || "식당",
+        availableDates: avail
+      };
+
+      const availBadge = avail.length > 0 
+        ? `<span style="color: #4ade80; font-weight: 700;">${avail.length}개 날짜 예약 가능!</span>`
+        : `<span style="color: #ff7a59; font-weight: 700;">전 일정 마감 (빈자리 감시 대기)</span>`;
+
+      if (ctPreviewCard) {
+        ctPreviewCard.innerHTML = `
+          <div style="display: flex; flex-direction: column; gap: 4px;">
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span class="biz-badge" style="background: linear-gradient(135deg, #ff5238, #ff7a59);">캐치테이블</span>
+              <strong style="color: #fff; font-size: 0.9rem;">${shop.shopName}</strong>
+            </div>
+            <div style="color: var(--text-muted); font-size: 0.74rem;">📍 ${shop.address || '위치 확인 중'} | 🍽️ 실시간 빈자리 푸시 모니터링</div>
+          </div>
+          ${availBadge}
+        `;
+      }
+
+      if (ctItemsChips) {
+        ctItemsChips.innerHTML = "";
+        const allChip = document.createElement("button");
+        allChip.type = "button";
+        allChip.className = "item-chip selected";
+        allChip.innerHTML = `<strong>✨ 전체 빈자리 감시 (추천)</strong><span style="font-size: 0.7rem; opacity: 0.8; display: block; margin-top: 2px;">어느 날짜든 빈자리 오픈 시 즉시 푸시 알림</span>`;
+        allChip.addEventListener("click", () => {
+          document.querySelectorAll("#ct-items-chips .item-chip").forEach(c => c.classList.remove("selected"));
+          allChip.classList.add("selected");
+          selectedCtTarget.selectedDate = "all";
+        });
+        ctItemsChips.appendChild(allChip);
+
+        avail.forEach(item => {
+          const chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = "item-chip";
+          const pCounts = item.availablePersonCounts || [];
+          const pText = pCounts.length ? `${Math.min(...pCounts)}~${Math.max(...pCounts)}명 가능` : '예약 가능';
+          chip.innerHTML = `<strong>${item.date}</strong><span style="font-size: 0.7rem; opacity: 0.8; display: block; margin-top: 2px;">${pText}</span>`;
+          chip.addEventListener("click", () => {
+            document.querySelectorAll("#ct-items-chips .item-chip").forEach(c => c.classList.remove("selected"));
+            chip.classList.add("selected");
+            selectedCtTarget.selectedDate = item.date;
+          });
+          ctItemsChips.appendChild(chip);
+        });
+      }
+
+      if (btnSubmitCt) btnSubmitCt.disabled = false;
+    } catch (err) {
+      if (ctPreviewCard) {
+        ctPreviewCard.innerHTML = `<span style="color: #ef4444;">❌ 조회 실패: ${err.message}</span>`;
+      }
+      selectedCtTarget = null;
+      if (btnSubmitCt) btnSubmitCt.disabled = true;
+    }
+  }
+
+  // 캐치테이블 예약 추가 버튼
+  if (btnSubmitCt) {
+    btnSubmitCt.addEventListener("click", async () => {
+      if (!selectedCtTarget) return;
+
+      btnSubmitCt.disabled = true;
+      btnSubmitCt.innerHTML = `<span>등록 중...</span>`;
+
+      const shopUrl = selectedCtTarget.shopUrl || selectedCtTarget.shopRef;
+      const finalUrl = `https://app.catchtable.co.kr/ct/shop/${shopUrl}`;
+
+      const newRes = {
+        id: "res_" + Date.now(),
+        naver_url: finalUrl,
+        business_type_id: 88,
+        business_id: selectedCtTarget.shopRef,
+        biz_item_id: selectedCtTarget.selectedDate || "all",
+        biz_name: selectedCtTarget.shopName,
+        item_name: selectedCtTarget.selectedDate && selectedCtTarget.selectedDate !== 'all' ? `${selectedCtTarget.selectedDate} 예약` : "전체 예약 일정 (빈자리 감시)",
+        is_active: true,
+        last_slots: []
+      };
+
+      await saveNewReservation(newRes);
+
+      if (ctSearchInput) ctSearchInput.value = "";
+      if (btnClearCtSearch) btnClearCtSearch.style.display = "none";
+      if (ctPreviewCard) ctPreviewCard.style.display = "none";
+      if (ctItemPickerCard) ctItemPickerCard.style.display = "none";
+      selectedCtTarget = null;
+      btnSubmitCt.disabled = false;
+      btnSubmitCt.innerHTML = `<span>+ 캐치테이블 빈자리 모니터링 추가</span>`;
+
+      await renderReservationsList();
+      showToast(`🎉 [${newRes.biz_name}] 빈자리 모니터링이 추가되었습니다!`);
+    });
+  }
 
   // -------------------------------------------------------------------------
   // A-2. 놀티켓 & 콘서트 취켓팅 실시간 검색 컨트롤러 (네이버 검색과 동일한 UX)
@@ -1036,6 +1423,58 @@ document.addEventListener("DOMContentLoaded", async () => {
         `;
       }
 
+      // 캐스트(출연진) 선택 칩 렌더링 (배우 최대 2명 선택)
+      const castSection = document.getElementById("nol-cast-section");
+      const castChipsGrid = document.getElementById("nol-cast-chips");
+      const castCountBadge = document.getElementById("nol-cast-count-badge");
+      selectedNolTarget.selectedCasts = [];
+
+      if (castSection && castChipsGrid) {
+        if (data.casts && data.casts.length > 0) {
+          castSection.style.display = "block";
+          castChipsGrid.innerHTML = "";
+          if (castCountBadge) castCountBadge.textContent = "0/2명 선택";
+
+          data.casts.forEach(cast => {
+            const chip = document.createElement("div");
+            chip.className = "cast-chip";
+            const avatarHtml = cast.image 
+              ? `<img src="${cast.image}" class="cast-avatar" alt="${cast.name}" onerror="this.onerror=null;this.parentElement.innerHTML='<div class=\\'cast-avatar-fallback\\'>🎭</div>';"/>` 
+              : `<div class="cast-avatar-fallback">🎭</div>`;
+
+            chip.innerHTML = `
+              ${avatarHtml}
+              <div class="cast-info">
+                <strong class="cast-name">${cast.name}</strong>
+                ${cast.character ? `<span class="cast-role">${cast.character} 역</span>` : ''}
+              </div>
+            `;
+
+            chip.addEventListener("click", () => {
+              const isSelected = chip.classList.contains("selected");
+              if (isSelected) {
+                chip.classList.remove("selected");
+                selectedNolTarget.selectedCasts = selectedNolTarget.selectedCasts.filter(c => c.name !== cast.name);
+              } else {
+                if (selectedNolTarget.selectedCasts.length >= 2) {
+                  showToast("선호 배우는 최대 2명까지만 선택하실 수 있습니다.");
+                  return;
+                }
+                chip.classList.add("selected");
+                selectedNolTarget.selectedCasts.push(cast);
+              }
+
+              const count = selectedNolTarget.selectedCasts.length;
+              if (castCountBadge) castCountBadge.textContent = `${count}/2명 선택`;
+            });
+
+            castChipsGrid.appendChild(chip);
+          });
+        } else {
+          castSection.style.display = "none";
+        }
+      }
+
       // 회차 선택 칩 렌더링
       if (nolSessionsChips) {
         nolSessionsChips.innerHTML = "";
@@ -1087,6 +1526,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       btnSubmitNol.disabled = true;
       btnSubmitNol.innerHTML = `<span>등록 중...</span>`;
 
+      let finalItemName = selectedNolTarget.selectedSessionLabel || "전체 회차";
+      if (selectedNolTarget.selectedCasts && selectedNolTarget.selectedCasts.length > 0) {
+        const castStr = selectedNolTarget.selectedCasts.map(c => c.name).join(", ");
+        finalItemName = `[캐스트: ${castStr}] ${finalItemName}`;
+      }
+
       const newRes = {
         id: "res_" + Date.now(),
         naver_url: `https://nol.yanolja.com/ticket/products/${selectedNolTarget.goodsCode}`,
@@ -1094,7 +1539,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         business_id: selectedNolTarget.goodsCode,
         biz_item_id: selectedNolTarget.selectedSessionSeq || "all",
         biz_name: selectedNolTarget.bizName,
-        item_name: selectedNolTarget.selectedSessionLabel || "전체 회차",
+        item_name: finalItemName,
         is_active: true,
         last_slots: []
       };
@@ -1377,6 +1822,65 @@ document.addEventListener("DOMContentLoaded", async () => {
     const info = await fetchPreviewInfo(parsed);
     parsedCurrentTarget.bizName = info.bizName;
 
+    if (parsed.platform === "catchtable") {
+      parsedCurrentTarget.itemName = "전체 예약 일정 (빈자리 감시)";
+      parsedCurrentTarget.bizItemId = "all";
+      parsedCurrentTarget.businessId = info.shopRef || parsed.businessId;
+
+      const avail = info.availableDates || [];
+      const availText = avail.length > 0 
+        ? `<span style="color: #4ade80; font-weight: 700;">${avail.length}개 날짜 예약 가능!</span>`
+        : `<span style="color: #ff7a59; font-weight: 700;">전 일정 마감 (빈자리 대기)</span>`;
+
+      previewBox.innerHTML = `
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <span class="biz-badge" style="background: linear-gradient(135deg, #ff5238, #ff7a59);">캐치테이블</span>
+            <strong>${info.bizName}</strong>
+          </div>
+          <div style="color: var(--text-muted); font-size: 0.75rem;">📍 ${info.address || '위치 확인 중'} | 실시간 빈자리 알림 모드</div>
+        </div>
+        ${availText}
+      `;
+
+      if (urlItemPickerCard && urlItemsChips) {
+        urlItemsLabel.textContent = "🍽️ 예약 가능 날짜 현황:";
+        urlItemsChips.innerHTML = "";
+
+        const allChip = document.createElement("button");
+        allChip.type = "button";
+        allChip.className = "item-chip selected";
+        allChip.textContent = "✨ 전체 빈자리 감시 (추천)";
+        allChip.addEventListener("click", () => {
+          document.querySelectorAll("#url-items-chips .item-chip").forEach(c => c.classList.remove("selected"));
+          allChip.classList.add("selected");
+          parsedCurrentTarget.bizItemId = "all";
+          parsedCurrentTarget.itemName = "전체 예약 일정 (빈자리 감시)";
+        });
+        urlItemsChips.appendChild(allChip);
+
+        avail.forEach(d => {
+          const chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = "item-chip";
+          const pCounts = d.availablePersonCounts || [];
+          chip.textContent = `${d.date} (${pCounts.join(",")}명)`;
+          chip.addEventListener("click", () => {
+            document.querySelectorAll("#url-items-chips .item-chip").forEach(c => c.classList.remove("selected"));
+            chip.classList.add("selected");
+            parsedCurrentTarget.bizItemId = d.date;
+            parsedCurrentTarget.itemName = `${d.date} 예약`;
+          });
+          urlItemsChips.appendChild(chip);
+        });
+
+        urlItemPickerCard.style.display = "flex";
+      }
+
+      btnSubmit.disabled = false;
+      return;
+    }
+
     if (parsed.platform === "nol_ticket") {
       parsedCurrentTarget.itemName = "전체 회차 (취켓팅)";
       parsedCurrentTarget.bizItemId = "all";
@@ -1494,8 +1998,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const baseInputUrl = urlInput.value.trim();
     let finalUrl = baseInputUrl;
-    if (parsedCurrentTarget.platform !== "nol_ticket") {
+    if (parsedCurrentTarget.platform === "naver") {
       finalUrl = attachDateRangeToUrl(baseInputUrl, "url");
+    } else if (parsedCurrentTarget.platform === "catchtable") {
+      finalUrl = baseInputUrl.startsWith("http") ? baseInputUrl : `https://app.catchtable.co.kr/ct/shop/${parsedCurrentTarget.businessId}`;
     }
 
     const newRes = {
@@ -1503,7 +2009,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       naver_url: finalUrl,
       business_type_id: parsedCurrentTarget.type,
       business_id: parsedCurrentTarget.businessId,
-      biz_item_id: parsedCurrentTarget.bizItemId || "1",
+      biz_item_id: parsedCurrentTarget.bizItemId || "all",
       biz_name: parsedCurrentTarget.bizName,
       item_name: parsedCurrentTarget.itemName || "기본 예약",
       is_active: true,
@@ -1522,6 +2028,110 @@ document.addEventListener("DOMContentLoaded", async () => {
     await renderReservationsList();
     showToast(`🎉 [${newRes.biz_name}] 모니터링이 추가되었습니다!`);
   });
+
+  // -------------------------------------------------------------------------
+  // D. Web Share Target (공유하기) & 클립보드 자동 연동 매니저
+  // -------------------------------------------------------------------------
+  const shareDetectBanner = document.getElementById("share-detect-banner");
+  const shareDetectTitle = document.getElementById("share-detect-title");
+  const shareDetectUrl = document.getElementById("share-detect-url");
+  const btnShareApply = document.getElementById("btn-share-apply");
+  const btnShareDismiss = document.getElementById("btn-share-dismiss");
+
+  function extractUrlFromText(text) {
+    if (!text) return null;
+    const match = text.match(/https?:\/\/[^\s"'<>]+/);
+    return match ? match[0] : null;
+  }
+
+  function handleSharedUrl(rawUrl) {
+    if (!rawUrl) return;
+    const cleanUrl = rawUrl.trim();
+    const parsed = parseAnyBookingUrl(cleanUrl);
+    if (!parsed) return;
+
+    if (parsed.platform === "catchtable") {
+      switchTab(tabCt);
+      if (ctSearchInput) {
+        ctSearchInput.value = cleanUrl;
+        if (btnClearCtSearch) btnClearCtSearch.style.display = "flex";
+        performCtSearch(cleanUrl);
+      }
+    } else if (parsed.platform === "nol_ticket") {
+      switchTab(tabNol);
+      if (nolSearchInput) {
+        nolSearchInput.value = cleanUrl;
+        if (btnClearNolSearch) btnClearNolSearch.style.display = "flex";
+        performNolSearch(cleanUrl);
+      }
+    } else {
+      switchTab(tabUrl);
+      if (urlInput) {
+        urlInput.value = cleanUrl;
+        handleUrlInput(cleanUrl);
+      }
+    }
+
+    showToast("🔗 공유된 링크가 자동으로 인식되었습니다!");
+  }
+
+  // 1) Web Share Target 쿼리 파라미터 확인 (?url=... 또는 ?text=...)
+  try {
+    const urlParams = new URLSearchParams(window.location.search);
+    const paramUrl = urlParams.get("url") || extractUrlFromText(urlParams.get("text")) || extractUrlFromText(urlParams.get("title"));
+    if (paramUrl) {
+      handleSharedUrl(paramUrl);
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    }
+  } catch (e) {}
+
+  // 2) 공유/클립보드 감지 배너 제어
+  if (btnShareDismiss && shareDetectBanner) {
+    btnShareDismiss.addEventListener("click", () => {
+      shareDetectBanner.style.display = "none";
+    });
+  }
+
+  if (btnShareApply && shareDetectBanner) {
+    btnShareApply.addEventListener("click", () => {
+      const targetUrl = shareDetectBanner.dataset.targetUrl;
+      shareDetectBanner.style.display = "none";
+      if (targetUrl) {
+        handleSharedUrl(targetUrl);
+      }
+    });
+  }
+
+  // 3) 앱 화면 복귀(Focus) 시 클립보드 자동 확인 (지원 브라우저)
+  async function checkClipboardOnFocus() {
+    if (!navigator.clipboard || !navigator.clipboard.readText) return;
+    try {
+      const clipText = await navigator.clipboard.readText();
+      if (!clipText || clipText.length < 10) return;
+      const detectedUrl = extractUrlFromText(clipText) || clipText;
+      const parsed = parseAnyBookingUrl(detectedUrl);
+      if (parsed && shareDetectBanner && shareDetectUrl && shareDetectTitle) {
+        if (shareDetectBanner.dataset.lastChecked === detectedUrl) return;
+        shareDetectBanner.dataset.targetUrl = detectedUrl;
+        shareDetectBanner.dataset.lastChecked = detectedUrl;
+        shareDetectTitle.textContent = parsed.platform === "catchtable" 
+          ? "🍽️ 캐치테이블 공유 링크 감지" 
+          : (parsed.platform === "nol_ticket" ? "🎫 놀티켓 공유 링크 감지" : "🔍 네이버 예약 링크 감지");
+        shareDetectUrl.textContent = detectedUrl;
+        shareDetectBanner.style.display = "flex";
+      }
+    } catch (e) {
+      // 클립보드 권한 거부 시 무시
+    }
+  }
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("focus", () => {
+      setTimeout(checkClipboardOnFocus, 300);
+    });
+  }
 
   // 초기 예약 목록 렌더링
   await renderReservationsList();

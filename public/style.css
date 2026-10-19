@@ -1189,3 +1189,293 @@ input:checked + .slider:before {
   transform: translateX(-50%) translateY(0);
   opacity: 1;
 }
+
+/* =========================================================================
+   Share Target & Clipboard Auto-Detection Banner
+   ========================================================================= */
+.share-detect-banner {
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.98));
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 16px rgba(139, 92, 246, 0.2);
+  backdrop-filter: blur(12px);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  animation: slideDown 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.share-detect-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.share-detect-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #ff5238, #8b5cf6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  flex-shrink: 0;
+  animation: pulseGlow 2s infinite;
+}
+
+@keyframes pulseGlow {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255, 82, 56, 0.4); }
+  50% { transform: scale(1.05); box-shadow: 0 0 0 8px rgba(255, 82, 56, 0); }
+}
+
+.share-detect-info {
+  min-width: 0;
+}
+
+.share-detect-info strong {
+  display: block;
+  font-size: 0.82rem;
+  color: #fff;
+  font-weight: 700;
+}
+
+.share-detect-info p {
+  font-size: 0.72rem;
+  color: #c4b5fd;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
+
+.share-detect-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.btn-share-apply {
+  background: linear-gradient(135deg, #ff5238, #ff7a59);
+  color: #fff;
+  border: none;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.btn-share-apply:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+
+.btn-share-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  cursor: pointer;
+  padding: 4px;
+  line-height: 1;
+  transition: color 0.2s ease;
+}
+
+.btn-share-dismiss:hover {
+  color: #fff;
+}
+
+/* =========================================================================
+   CatchTable Tab & Submit Button Themes
+   ========================================================================= */
+.tab-btn-ct.active {
+  background: rgba(255, 82, 56, 0.18);
+  border-color: #ff5238;
+  color: #ff7a59;
+}
+
+.btn-submit-ct {
+  background: linear-gradient(135deg, #ff5238 0%, #ff7a59 100%) !important;
+  box-shadow: 0 4px 14px rgba(255, 82, 56, 0.35) !important;
+}
+
+.btn-submit-ct:hover:not(:disabled) {
+  box-shadow: 0 6px 20px rgba(255, 82, 56, 0.5) !important;
+}
+
+/* =========================================================================
+   Nol Ticket Cast Selection UI (배우 1~2명 선택)
+   ========================================================================= */
+.cast-section {
+  margin-top: 12px;
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px solid rgba(139, 92, 246, 0.22);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+}
+
+.cast-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.cast-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #c4b5fd;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.cast-count-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #e9d5ff;
+  background: rgba(139, 92, 246, 0.25);
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+}
+
+.cast-desc {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.cast-chips-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.cast-chips-grid::-webkit-scrollbar {
+  width: 4px;
+}
+.cast-chips-grid::-webkit-scrollbar-thumb {
+  background: rgba(139, 92, 246, 0.3);
+  border-radius: 4px;
+}
+
+.cast-chip {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-md);
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  text-align: left;
+  user-select: none;
+}
+
+.cast-chip:hover {
+  background: rgba(139, 92, 246, 0.12);
+  border-color: rgba(139, 92, 246, 0.35);
+  transform: translateY(-1px);
+}
+
+.cast-chip.selected {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.25), rgba(99, 102, 241, 0.25));
+  border-color: #a78bfa;
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.3);
+}
+
+.cast-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.cast-avatar-fallback {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(139, 92, 246, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+
+.cast-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.cast-name {
+  display: block;
+  font-size: 0.78rem;
+  color: #fff;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cast-role {
+  display: block;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
+
+.cast-chip.selected .cast-name {
+  color: #e9d5ff;
+}
+
+.cast-chip.selected .cast-role {
+  color: #c4b5fd;
+}
+
+/* Reservation Card Cast Badge */
+.cast-badge {
+  font-size: 0.7rem;
+  color: #e9d5ff;
+  background: rgba(139, 92, 246, 0.18);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  padding: 2px 7px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-weight: 600;
+  margin-right: 4px;
+  margin-top: 4px;
+}
+

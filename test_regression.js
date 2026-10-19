@@ -56,14 +56,16 @@ async function runAllTests() {
   }
 
   // -------------------------------------------------------------------------
-  // 2. 파이썬 스케줄러 문법 검증 (Python Syntax Check)
+  // 2. 파이썬 스케줄러 및 서버리스 문법 검증 (Python Syntax Check)
   // -------------------------------------------------------------------------
-  console.log("\n[2/4] 파이썬 스케줄러 구문 검사 (python -m py_compile)...");
+  console.log("\n[2/4] 파이썬 스케줄러 및 서버리스 구문 검사 (python -m py_compile)...");
   try {
     execSync('python -m py_compile scheduler.py', { stdio: 'pipe' });
     assert(true, "scheduler.py 컴파일 및 문법 검사 통과");
+    execSync('python -m py_compile public/api/catchtable.py', { stdio: 'pipe' });
+    assert(true, "public/api/catchtable.py 컴파일 및 문법 검사 통과");
   } catch (e) {
-    assert(false, `scheduler.py 구문 오류: ${e.message}`);
+    assert(false, `파이썬 구문 오류: ${e.message}`);
   }
 
   // -------------------------------------------------------------------------
@@ -86,8 +88,10 @@ async function runAllTests() {
           })
         }
       },
-      location: { origin: "http://localhost" },
-      matchMedia: () => ({ matches: false })
+      location: { origin: "http://localhost", search: "" },
+      matchMedia: () => ({ matches: false }),
+      history: { replaceState: () => {} },
+      addEventListener: () => {}
     };
     global.navigator = global.window.navigator;
     global.localStorage = { getItem: () => null, setItem: () => {} };
@@ -135,12 +139,19 @@ async function runAllTests() {
     assert(typeof listeners["btn-submit-search:click"] === 'function', "검색 예약 추가 버튼(btn-submit-search) 클릭 리스너 정상 바인딩");
     assert(typeof listeners["btn-submit:click"] === 'function', "URL 예약 추가 버튼(btn-submit) 클릭 리스너 정상 바인딩");
     assert(typeof listeners["tab-search:click"] === 'function', "검색 탭 버튼(tab-search) 클릭 리스너 정상 바인딩");
+    assert(typeof listeners["tab-ct:click"] === 'function', "캐치테이블 탭 버튼(tab-ct) 클릭 리스너 정상 바인딩");
     assert(typeof listeners["tab-nol:click"] === 'function', "놀티켓 탭 버튼(tab-nol) 클릭 리스너 정상 바인딩");
     assert(typeof listeners["tab-url:click"] === 'function', "URL 탭 버튼(tab-url) 클릭 리스너 정상 바인딩");
+    assert(typeof listeners["ct-search-input:input"] === 'function', "캐치테이블 검색 입력창(ct-search-input) 리스너 정상 바인딩");
+    assert(typeof listeners["btn-clear-ct-search:click"] === 'function', "캐치테이블 검색어 삭제(btn-clear-ct-search) 리스너 정상 바인딩");
+    assert(typeof listeners["btn-ct-reselect:click"] === 'function', "캐치테이블 다시 검색(btn-ct-reselect) 리스너 정상 바인딩");
+    assert(typeof listeners["btn-submit-ct:click"] === 'function', "캐치테이블 모니터링 추가(btn-submit-ct) 리스너 정상 바인딩");
     assert(typeof listeners["nol-search-input:input"] === 'function', "놀티켓 실시간 검색 입력창(nol-search-input) 리스너 정상 바인딩");
     assert(typeof listeners["btn-clear-nol-search:click"] === 'function', "놀티켓 검색어 삭제 버튼(btn-clear-nol-search) 리스너 정상 바인딩");
     assert(typeof listeners["btn-nol-reselect:click"] === 'function', "놀티켓 다시 검색 버튼(btn-nol-reselect) 리스너 정상 바인딩");
     assert(typeof listeners["btn-submit-nol:click"] === 'function', "놀티켓 모니터링 추가 버튼(btn-submit-nol) 클릭 리스너 정상 바인딩");
+    assert(typeof listeners["btn-share-dismiss:click"] === 'function', "공유 감시 배너 닫기 버튼(btn-share-dismiss) 리스너 정상 바인딩");
+    assert(typeof listeners["btn-share-apply:click"] === 'function', "공유 감시 배너 적용 버튼(btn-share-apply) 리스너 정상 바인딩");
   } catch (err) {
     assert(false, `DOM 초기화 런타임 오류 발생: ${err.message}`);
   } finally {
@@ -286,8 +297,22 @@ async function runAllTests() {
 
     assert(hasGoodsName, "놀티켓 다이나믹 듀오 콘서트 공연명 정상 조회");
     assert(hasThreeSessions, `놀티켓 다이나믹 듀오 콘서트 3개 회차(11/27, 11/28, 11/29) 정상 추출 (${nolResult?.sessions?.length}회차)`);
+    assert(Array.isArray(nolResult?.casts), "놀티켓 출연진(캐스트) 추출 필드(casts) 정상 반환 확인");
   } catch (err) {
     assert(false, `nol.js API 테스트 중 오류: ${err.message}`);
+  }
+
+  // (5) PWA Web Share Target manifest.json 검증
+  try {
+    const manifestPath = path.resolve(__dirname, 'public/manifest.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    const hasShareTarget = manifest && manifest.share_target &&
+      manifest.share_target.action === '/' &&
+      manifest.share_target.params &&
+      manifest.share_target.params.url === 'url';
+    assert(hasShareTarget, "PWA Web Share Target(공유하기 연계) manifest.json 설정 정상 검증");
+  } catch (err) {
+    assert(false, `manifest.json 파싱 오류: ${err.message}`);
   }
 
   console.log("\n==================================================");

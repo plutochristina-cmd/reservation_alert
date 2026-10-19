@@ -26,6 +26,51 @@ async function fetchConcertSummary(cleanCode) {
   }
 }
 
+async function fetchCastCredits(cleanCode) {
+  try {
+    const url = `https://nol.yanolja.com/ticket/products/${cleanCode}`;
+    const resp = await fetch(url, { headers: HEADERS });
+    if (!resp.ok) return [];
+    const html = await resp.text();
+    const idx = html.indexOf('castCredits');
+    if (idx === -1) return [];
+    const startIdx = html.indexOf('[', idx);
+    if (startIdx === -1) return [];
+    let depth = 0;
+    let endIdx = -1;
+    for (let i = startIdx; i < html.length && i < startIdx + 30000; i++) {
+      if (html[i] === '[') depth++;
+      else if (html[i] === ']') {
+        depth--;
+        if (depth === 0) {
+          endIdx = i;
+          break;
+        }
+      }
+    }
+    if (endIdx === -1) return [];
+    const rawSlice = html.substring(startIdx, endIdx + 1);
+    const jsonStr = rawSlice.replace(/\\"/g, '"');
+    const casts = JSON.parse(jsonStr);
+    const unique = [];
+    const seen = new Set();
+    casts.forEach(c => {
+      if (c.manName && !seen.has(c.manName)) {
+        seen.add(c.manName);
+        unique.push({
+          name: c.manName,
+          character: c.characterName || '',
+          isLead: Boolean(c.leadActor),
+          image: c.manSmallImageUrl || c.manLargeImageUrl || ''
+        });
+      }
+    });
+    return unique;
+  } catch (e) {
+    return [];
+  }
+}
+
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -83,8 +128,11 @@ module.exports = async function handler(req, res) {
   const cleanCode = codeMatch ? codeMatch[1] : String(rawTarget).trim();
 
   try {
-    // 1) 기본 요약 정보 조회
-    const summaryData = await fetchConcertSummary(cleanCode);
+    // 1) 기본 요약 정보 및 출연진(캐스트) 정보 조회
+    const [summaryData, castsData] = await Promise.all([
+      fetchConcertSummary(cleanCode),
+      fetchCastCredits(cleanCode)
+    ]);
 
     // 2) 각 회차별 잔여석 실시간 조회 (001, 002, 003...)
     const sessions = [];
@@ -137,6 +185,7 @@ module.exports = async function handler(req, res) {
       playStartDate: summaryData?.playStartDate || '',
       playEndDate: summaryData?.playEndDate || '',
       playTime: summaryData?.playTime || '',
+      casts: castsData || [],
       sessions: enrichedSessions
     });
   } catch (error) {

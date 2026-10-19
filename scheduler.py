@@ -235,6 +235,71 @@ def scan_nol_ticket_seats(goods_code: str, play_seq: str = "all") -> list:
     return available
 
 
+def get_catchtable_shop_ref(shop_ref_or_alias: str) -> str:
+    """캐치테이블 식당 alias(영문명)를 고유 shopRef로 변환합니다."""
+    if not shop_ref_or_alias:
+        return ""
+    # 이미 20자 이상의 shopRef인 경우 바로 반환
+    if len(shop_ref_or_alias) >= 20 and '-' not in shop_ref_or_alias and '/' not in shop_ref_or_alias:
+        return shop_ref_or_alias
+    clean_alias = shop_ref_or_alias.replace('https://app.catchtable.co.kr/ct/shop/', '').replace('https://catchtable.co.kr/', '').strip('/')
+    try:
+        url = f"https://ct-api.catchtable.co.kr/api/v4/shops/{clean_alias}"
+        headers = {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        resp = requests.get(url, headers=headers, timeout=6)
+        if resp.status_code == 200:
+            vo = resp.json().get('data', {}).get('shopDetailVO', {})
+            resolved = vo.get('shopRef')
+            if resolved:
+                return resolved
+    except Exception as e:
+        logger.warning(f"캐치테이블 shopRef 변환 실패 ({shop_ref_or_alias}): {e}")
+    return clean_alias
+
+
+def scan_catchtable_slots(shop_ref: str, max_results: int = 5) -> list:
+    """캐치테이블 실시간 예약 가능 날짜 및 인원 수를 스캔합니다."""
+    resolved_ref = get_catchtable_shop_ref(shop_ref)
+    headers = {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Origin': 'https://app.catchtable.co.kr',
+        'Referer': 'https://app.catchtable.co.kr/'
+    }
+    url = f"https://ct-api.catchtable.co.kr/api/reservation/v1/dining/day-slots?shopRef={resolved_ref}&tableSeqs=&personCounts="
+    available = []
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json().get("data", [])
+            for item in data:
+                if item.get("availableStatus") == "AVAILABLE":
+                    dt_str = item.get("date")  # e.g. "2026-10-28"
+                    p_counts = item.get("availablePersonCounts") or []
+                    p_text = f"가능 인원: {min(p_counts)}~{max(p_counts)}명" if p_counts else "예약 가능"
+                    try:
+                        dt = datetime.strptime(dt_str, "%Y-%m-%d")
+                        weekday = WEEKDAY_KR[dt.weekday()]
+                        kor_text = f"{dt.strftime('%m월 %d일')}({weekday}) ({p_text})"
+                    except Exception:
+                        kor_text = f"{dt_str} ({p_text})"
+                    
+                    available.append({
+                        "date": dt_str,
+                        "person_counts": p_counts,
+                        "korean_text": kor_text
+                    })
+    except Exception as e:
+        logger.warning(f"캐치테이블 슬롯 조회 오류 ({shop_ref}): {e}")
+
+    return available[:max_results]
+
+
 def send_web_push(subscription_info: dict, title: str, body: str, url: str) -> bool:
     """W3C VAPID 표준 Web Push를 통해 스마트폰 잠금화면으로 푸시 알림을 전송합니다."""
     if not subscription_info or "endpoint" not in subscription_info:
@@ -318,7 +383,13 @@ def run_supabase_multi_user():
                 if top_seats and (is_changed or force_notify):
                     logger.info(f"🎉 [놀티켓 취소표 발견!] [{biz_name}] {top_seats[0]['korean_text']}")
                     title = f"🎫 [취소표 발생!] {biz_name}"
-                    body = f"{top_seats[0]['korean_text']}\n지금 즉시 예매하세요!"
+                    cast_prefix = ""
+                    if "[캐스트:" in item_name:
+                        import re
+                        m_cast = re.search(r'\[캐스트:[^\]]+\]', item_name)
+                        if m_cast:
+                            cast_prefix = f"🎭 {m_cast.group(0)}\n"
+                    body = f"{cast_prefix}{top_seats[0]['korean_text']}\n지금 즉시 예매하세요!"
                     if len(top_seats) > 1:
                         body += f"\n외 {len(top_seats)-1}개 좌석 오픈"
 
@@ -340,6 +411,43 @@ def run_supabase_multi_user():
                     requests.patch(update_url, headers=headers, json=payload)
                 else:
                     logger.info(f"ℹ️ [놀티켓] [{biz_name}] 이전 확인 시점과 동일합니다. (중복 알림 방지)")
+                    requests.patch(update_url, headers=headers, json={
+                        "updated_at": now_iso
+                    })
+                continue
+
+            if biz_type == 88:
+                # 캐치테이블 레스토랑 예약 모니터링
+                logger.info(f"🔎 [캐치테이블] 스캔 시작: [{biz_name}] (shopRef: {biz_id})")
+                top_slots = scan_catchtable_slots(biz_id, max_results=3)
+                current_slot_keys = [s["korean_text"] for s in top_slots]
+                is_changed = (current_slot_keys != last_slots)
+
+                if top_slots and (is_changed or force_notify):
+                    logger.info(f"🎉 [캐치테이블 빈자리 발견!] [{biz_name}] {top_slots[0]['korean_text']}")
+                    title = f"🍽️ [빈자리 오픈!] {biz_name}"
+                    body = f"{top_slots[0]['korean_text']}\n지금 즉시 예약하세요!"
+                    if len(top_slots) > 1:
+                        body += f"\n외 {len(top_slots)-1}개 날짜 오픈"
+
+                    if push_sub:
+                        send_web_push(push_sub, title, body, naver_url)
+                    else:
+                        logger.warning(f"⚠️ [{biz_name}] 푸시 구독 토큰이 등록되지 않은 기기입니다.")
+
+                    requests.patch(update_url, headers=headers, json={
+                        "last_slots": current_slot_keys,
+                        "updated_at": now_iso
+                    })
+                elif not top_slots:
+                    logger.info(f"❌ [캐치테이블] [{biz_name}] 현재 예약 가능한 일정이 없습니다. (전석 마감)")
+                    payload = {"updated_at": now_iso}
+                    if last_slots:
+                        logger.info(f"🔄 [캐치테이블] [{biz_name}] 이전 슬롯이 마감되어 상태를 리셋합니다. (다음 취소표 발생 시 즉시 감지)")
+                        payload["last_slots"] = []
+                    requests.patch(update_url, headers=headers, json=payload)
+                else:
+                    logger.info(f"ℹ️ [캐치테이블] [{biz_name}] 이전 확인 시점과 동일합니다. (중복 알림 방지)")
                     requests.patch(update_url, headers=headers, json={
                         "updated_at": now_iso
                     })
