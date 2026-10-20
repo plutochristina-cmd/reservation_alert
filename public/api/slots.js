@@ -59,13 +59,16 @@ module.exports = async function handler(req, res) {
       } catch (e) {}
     }
 
-    // 슬롯 조회 기간 계산 (기본값: 오늘 ~ 35일 후)
-    const now = new Date();
+    // 슬롯 조회 기간 계산 (KST 한국 표준시 기준: 기본값 오늘 ~ 35일 후)
     const pad = (n) => String(n).padStart(2, '0');
-    const toDateStr = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const toKstDateStr = (dateObj) => {
+      const kst = new Date(dateObj.getTime() + 9 * 3600 * 1000);
+      return `${kst.getUTCFullYear()}-${pad(kst.getUTCMonth() + 1)}-${pad(kst.getUTCDate())}`;
+    };
 
-    const startStr = startDate ? startDate.slice(0, 10) : toDateStr(now);
-    const endStr = endDate ? endDate.slice(0, 10) : toDateStr(new Date(now.getTime() + 35 * 24 * 3600 * 1000));
+    const currentEpoch = Date.now();
+    const startStr = startDate ? startDate.slice(0, 10) : toKstDateStr(new Date(currentEpoch));
+    const endStr = endDate ? endDate.slice(0, 10) : toKstDateStr(new Date(currentEpoch + 35 * 24 * 3600 * 1000));
 
     const query = `
       query hourlySchedule($scheduleParams: ScheduleParams) {
@@ -119,8 +122,13 @@ module.exports = async function handler(req, res) {
 
     for (const slot of rawHourly) {
       if (!slot.unitStartTime) continue;
-      const slotTime = new Date(slot.unitStartTime.replace(' ', 'T'));
-      if (slotTime <= now) continue;
+
+      // 네이버 슬롯은 KST(한국 표준시, UTC+9) 기준 문자열 (예: "2026-10-20 14:00:00")
+      // Vercel 서버(UTC)에서도 한국 시각 기준으로 정확히 비교할 수 있도록 +09:00 오프셋을 적용
+      const slotEpoch = new Date(slot.unitStartTime.replace(' ', 'T') + '+09:00').getTime();
+      
+      // 현재 한국 시각 기준으로 이미 지나간 과거 슬롯 제외
+      if (isNaN(slotEpoch) || slotEpoch <= currentEpoch) continue;
 
       const isOpen = slot.isBusinessDay && slot.isUnitBusinessDay && slot.isSaleDay && slot.isUnitSaleDay;
       const stock = slot.unitStock != null ? slot.unitStock : (slot.stock || 0);
@@ -128,8 +136,13 @@ module.exports = async function handler(req, res) {
       const remain = stock - booked;
 
       if (isOpen && remain > 0) {
-        const wk = weekdayKr[slotTime.getDay()];
-        const formatted = `${slotTime.getFullYear()}년 ${pad(slotTime.getMonth()+1)}월 ${pad(slotTime.getDate())}일 (${wk}) ${pad(slotTime.getHours())}:${pad(slotTime.getMinutes())} (잔여: ${remain}자리)`;
+        // 날짜/시간 포맷: 문자열 직접 파싱으로 서버 타임존 왜곡 방지
+        const [datePart, timePart] = slot.unitStartTime.split(' ');
+        const [year, month, day] = datePart.split('-');
+        const [hour, min] = (timePart || '00:00').split(':');
+        const dayOfWeekIdx = new Date(Number(year), Number(month) - 1, Number(day)).getDay();
+        const wk = weekdayKr[dayOfWeekIdx];
+        const formatted = `${year}년 ${month}월 ${day}일 (${wk}) ${hour}:${min} (잔여: ${remain}자리)`;
         availableSlots.push({
           startTime: slot.unitStartTime,
           remain,

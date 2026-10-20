@@ -9,7 +9,13 @@ import os
 import sys
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# 한국 표준시(KST, UTC+9) 고정 정의 (GitHub Actions/UTC 환경 오차 방지)
+KST = timezone(timedelta(hours=9))
+
+def get_now_kst() -> datetime:
+    return datetime.now(KST).replace(tzinfo=None)
 import requests
 from dotenv import load_dotenv
 
@@ -135,7 +141,7 @@ def fetch_hourly_schedule(start_dt: datetime, end_dt: datetime) -> list:
 
 def find_earliest_available_slots(days_ahead: int = 365, max_results: int = 3) -> list:
     """현재 시점부터 미래 days_ahead 일 동안 예약 가능한 가장 빠른 슬롯을 max_results 개까지 검색합니다."""
-    now = datetime.now()
+    now = get_now_kst()
     chunk_size = 60  # 60일 단위로 분할 조회
     current_start = now
     end_limit = now + timedelta(days=days_ahead)
