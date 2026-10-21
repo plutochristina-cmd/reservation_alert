@@ -330,19 +330,55 @@ def send_web_push(subscription_info: dict, title: str, body: str, url: str) -> b
         return False
 
 
+def fetch_active_reservations_secure(headers: dict):
+    rpc_url = f"{SUPABASE_URL}/rest/v1/rpc/scheduler_get_active_reservations"
+    try:
+        r = requests.post(rpc_url, headers=headers, json={"p_scheduler_key": VAPID_PRIVATE_KEY}, timeout=10)
+        if r.status_code == 200:
+            return r.json(), None
+    except Exception:
+        pass
+
+    url = f"{SUPABASE_URL}/rest/v1/reservations?select=id,device_id,naver_url,business_type_id,business_id,biz_item_id,biz_name,item_name,last_slots,devices(push_subscription)&is_active=eq.true"
+    resp = requests.get(url, headers=headers, timeout=10)
+    if resp.status_code == 200:
+        return resp.json(), None
+    return None, f"Supabase query failed ({resp.status_code}): {resp.text}"
+
+
+def update_reservation_secure(headers: dict, res_id: str, payload: dict):
+    rpc_url = f"{SUPABASE_URL}/rest/v1/rpc/scheduler_update_reservation"
+    rpc_body = {
+        "p_scheduler_key": VAPID_PRIVATE_KEY,
+        "p_reservation_id": res_id,
+        "p_last_slots": payload.get("last_slots"),
+        "p_updated_at": payload.get("updated_at"),
+        "p_business_id": payload.get("business_id"),
+        "p_biz_item_id": payload.get("biz_item_id"),
+        "p_item_name": payload.get("item_name"),
+        "p_naver_url": payload.get("naver_url")
+    }
+    try:
+        r = requests.post(rpc_url, headers=headers, json=rpc_body, timeout=8)
+        if r.status_code == 200:
+            return
+    except Exception:
+        pass
+
+    update_url = f"{SUPABASE_URL}/rest/v1/reservations?id=eq.{res_id}"
+    requests.patch(update_url, headers=headers, json=payload, timeout=8)
+
+
 def execute_multi_user_scan(force_notify: bool = False) -> dict:
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json"
     }
-    url = f"{SUPABASE_URL}/rest/v1/reservations?select=id,device_id,naver_url,business_type_id,business_id,biz_item_id,biz_name,item_name,last_slots,devices(push_subscription)&is_active=eq.true"
+    reservations, err = fetch_active_reservations_secure(headers)
+    if err:
+        return {"ok": False, "error": err}
 
-    resp = requests.get(url, headers=headers, timeout=10)
-    if resp.status_code != 200:
-        return {"ok": False, "error": f"Supabase query failed ({resp.status_code})", "details": resp.text}
-
-    reservations = resp.json()
     summary = []
 
     for res in reservations:
@@ -355,9 +391,8 @@ def execute_multi_user_scan(force_notify: bool = False) -> dict:
         naver_url = res["naver_url"]
         last_slots = res.get("last_slots") or []
         device_info = res.get("devices") or {}
-        push_sub = device_info.get("push_subscription")
+        push_sub = res.get("push_subscription") or device_info.get("push_subscription")
         now_iso = get_now_kst_iso()
-        update_url = f"{SUPABASE_URL}/rest/v1/reservations?id=eq.{res_id}"
         pushed = False
 
         if biz_type == 99:
@@ -376,14 +411,14 @@ def execute_multi_user_scan(force_notify: bool = False) -> dict:
                     body += f"\n외 {len(top_seats)-1}개 좌석 오픈"
                 if push_sub:
                     pushed = send_web_push(push_sub, title, body, naver_url)
-                requests.patch(update_url, headers=headers, json={"last_slots": current_keys, "updated_at": now_iso}, timeout=8)
+                update_reservation_secure(headers, res_id, {"last_slots": current_keys, "updated_at": now_iso})
             elif not top_seats:
                 payload = {"updated_at": now_iso}
                 if last_slots:
                     payload["last_slots"] = []
-                requests.patch(update_url, headers=headers, json=payload, timeout=8)
+                update_reservation_secure(headers, res_id, payload)
             else:
-                requests.patch(update_url, headers=headers, json={"updated_at": now_iso}, timeout=8)
+                update_reservation_secure(headers, res_id, {"updated_at": now_iso})
 
             summary.append({"id": res_id, "biz_name": biz_name, "found": len(top_seats), "pushed": pushed, "updated_at": now_iso})
             continue
@@ -399,14 +434,14 @@ def execute_multi_user_scan(force_notify: bool = False) -> dict:
                     body += f"\n외 {len(top_slots)-1}개 날짜 오픈"
                 if push_sub:
                     pushed = send_web_push(push_sub, title, body, naver_url)
-                requests.patch(update_url, headers=headers, json={"last_slots": current_keys, "updated_at": now_iso}, timeout=8)
+                update_reservation_secure(headers, res_id, {"last_slots": current_keys, "updated_at": now_iso})
             elif not top_slots:
                 payload = {"updated_at": now_iso}
                 if last_slots:
                     payload["last_slots"] = []
-                requests.patch(update_url, headers=headers, json=payload, timeout=8)
+                update_reservation_secure(headers, res_id, payload)
             else:
-                requests.patch(update_url, headers=headers, json={"updated_at": now_iso}, timeout=8)
+                update_reservation_secure(headers, res_id, {"updated_at": now_iso})
 
             summary.append({"id": res_id, "biz_name": biz_name, "found": len(top_slots), "pushed": pushed, "updated_at": now_iso})
             continue
@@ -440,14 +475,14 @@ def execute_multi_user_scan(force_notify: bool = False) -> dict:
                 body += f"\n외 {len(top_slots)-1}개 슬롯 가능"
             if push_sub:
                 pushed = send_web_push(push_sub, title, body, naver_url)
-            requests.patch(update_url, headers=headers, json={**extra_patch, "last_slots": current_keys, "updated_at": now_iso}, timeout=8)
+            update_reservation_secure(headers, res_id, {**extra_patch, "last_slots": current_keys, "updated_at": now_iso})
         elif not top_slots:
             payload = {**extra_patch, "updated_at": now_iso}
             if last_slots:
                 payload["last_slots"] = []
-            requests.patch(update_url, headers=headers, json=payload, timeout=8)
+            update_reservation_secure(headers, res_id, payload)
         else:
-            requests.patch(update_url, headers=headers, json={**extra_patch, "updated_at": now_iso}, timeout=8)
+            update_reservation_secure(headers, res_id, {**extra_patch, "updated_at": now_iso})
 
         summary.append({"id": res_id, "biz_name": biz_name, "found": len(top_slots), "pushed": pushed, "updated_at": now_iso})
 

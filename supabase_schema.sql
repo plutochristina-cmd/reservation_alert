@@ -36,18 +36,26 @@ CREATE INDEX IF NOT EXISTS idx_reservations_device_id ON public.reservations(dev
 CREATE INDEX IF NOT EXISTS idx_reservations_is_active ON public.reservations(is_active);
 
 -- =========================================================================
+-- RLS (Row-Level Security) 활성화: 외부의 테이블 직접 조회/수정/삭제 100% 차단
+-- (모든 합법적 접근은 아래 SECURITY DEFINER 보안 RPC 함수를 통해서만 수행됨)
+-- =========================================================================
+ALTER TABLE public.devices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.reservations ENABLE ROW LEVEL SECURITY;
+
+-- =========================================================================
 -- 보안 RPC 함수 (SHA-256 해시 기반 무로그인 인증)
 -- 각 사용자는 자신의 secret_hash와 일치하는 데이터만 접근 가능 (타인 간섭 100% 차단)
 -- =========================================================================
 
 -- (1) 기기 등록 및 Web Push 구독 갱신
-CREATE OR REPLACE FUNCTION register_device(
+CREATE OR REPLACE FUNCTION public.register_device(
     p_secret_hash TEXT,
     p_push_subscription JSONB DEFAULT NULL
 )
 RETURNS UUID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $$
 DECLARE
     v_device_id UUID;
@@ -64,8 +72,9 @@ BEGIN
 END;
 $$;
 
--- (2) 내 예약 목록 조회 (내 해시값과 일치하는 데이터만 반환)
-CREATE OR REPLACE FUNCTION get_my_reservations(p_secret_hash TEXT)
+-- (2) 내 예약 목록 조회 (내 해시값과 일치하는 데이터만 반환, updated_at 포함)
+DROP FUNCTION IF EXISTS public.get_my_reservations(TEXT);
+CREATE OR REPLACE FUNCTION public.get_my_reservations(p_secret_hash TEXT)
 RETURNS TABLE (
     id UUID,
     naver_url TEXT,
@@ -76,10 +85,12 @@ RETURNS TABLE (
     item_name TEXT,
     is_active BOOLEAN,
     last_slots JSONB,
-    created_at TIMESTAMPTZ
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $$
 BEGIN
     RETURN QUERY
@@ -93,7 +104,8 @@ BEGIN
         r.item_name,
         r.is_active,
         r.last_slots,
-        r.created_at
+        r.created_at,
+        r.updated_at
     FROM public.reservations r
     JOIN public.devices d ON r.device_id = d.id
     WHERE d.secret_hash = p_secret_hash
@@ -102,7 +114,7 @@ END;
 $$;
 
 -- (3) 새 예약 등록
-CREATE OR REPLACE FUNCTION add_reservation(
+CREATE OR REPLACE FUNCTION public.add_reservation(
     p_secret_hash TEXT,
     p_naver_url TEXT,
     p_business_type_id INT,
@@ -114,6 +126,7 @@ CREATE OR REPLACE FUNCTION add_reservation(
 RETURNS UUID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $$
 DECLARE
     v_device_id UUID;
@@ -151,7 +164,7 @@ END;
 $$;
 
 -- (4) 예약 활성/비활성 토글 (본인 소유 검증)
-CREATE OR REPLACE FUNCTION toggle_reservation(
+CREATE OR REPLACE FUNCTION public.toggle_reservation(
     p_secret_hash TEXT,
     p_reservation_id UUID,
     p_is_active BOOLEAN
@@ -159,6 +172,7 @@ CREATE OR REPLACE FUNCTION toggle_reservation(
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $$
 BEGIN
     UPDATE public.reservations r
@@ -173,13 +187,14 @@ END;
 $$;
 
 -- (5) 예약 삭제 (본인 소유 검증)
-CREATE OR REPLACE FUNCTION delete_reservation(
+CREATE OR REPLACE FUNCTION public.delete_reservation(
     p_secret_hash TEXT,
     p_reservation_id UUID
 )
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $$
 BEGIN
     DELETE FROM public.reservations r
@@ -187,6 +202,82 @@ BEGIN
     WHERE r.device_id = d.id
       AND r.id = p_reservation_id
       AND d.secret_hash = p_secret_hash;
+
+    RETURN FOUND;
+END;
+$$;
+
+-- (5-1) 스케줄러 전용: 활성 예약 전체 조회 (서버 전용 비밀키 검증)
+CREATE OR REPLACE FUNCTION public.scheduler_get_active_reservations(p_scheduler_key TEXT)
+RETURNS TABLE (
+    id UUID,
+    device_id UUID,
+    naver_url TEXT,
+    business_type_id INT,
+    business_id TEXT,
+    biz_item_id TEXT,
+    biz_name TEXT,
+    item_name TEXT,
+    last_slots JSONB,
+    push_subscription JSONB
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    IF p_scheduler_key IS DISTINCT FROM 'PBSoenIWJRdlY2YSY3lSsiFV43WGHdaRh6MRMz9094c' THEN
+        RAISE EXCEPTION 'Unauthorized scheduler key';
+    END IF;
+
+    RETURN QUERY
+    SELECT
+        r.id,
+        r.device_id,
+        r.naver_url,
+        r.business_type_id,
+        r.business_id,
+        r.biz_item_id,
+        r.biz_name,
+        r.item_name,
+        r.last_slots,
+        d.push_subscription
+    FROM public.reservations r
+    LEFT JOIN public.devices d ON r.device_id = d.id
+    WHERE r.is_active = true;
+END;
+$$;
+
+-- (5-2) 스케줄러 전용: 스캔 결과 및 확인 시각 업데이트 (서버 전용 비밀키 검증)
+CREATE OR REPLACE FUNCTION public.scheduler_update_reservation(
+    p_scheduler_key TEXT,
+    p_reservation_id UUID,
+    p_last_slots JSONB DEFAULT NULL,
+    p_updated_at TIMESTAMPTZ DEFAULT now(),
+    p_business_id TEXT DEFAULT NULL,
+    p_biz_item_id TEXT DEFAULT NULL,
+    p_item_name TEXT DEFAULT NULL,
+    p_naver_url TEXT DEFAULT NULL
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    IF p_scheduler_key IS DISTINCT FROM 'PBSoenIWJRdlY2YSY3lSsiFV43WGHdaRh6MRMz9094c' THEN
+        RAISE EXCEPTION 'Unauthorized scheduler key';
+    END IF;
+
+    UPDATE public.reservations
+    SET
+        last_slots = COALESCE(p_last_slots, last_slots),
+        updated_at = COALESCE(p_updated_at, now()),
+        business_id = COALESCE(p_business_id, business_id),
+        biz_item_id = COALESCE(p_biz_item_id, biz_item_id),
+        item_name = COALESCE(p_item_name, item_name),
+        naver_url = COALESCE(p_naver_url, naver_url)
+    WHERE id = p_reservation_id;
 
     RETURN FOUND;
 END;

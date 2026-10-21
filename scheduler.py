@@ -410,6 +410,48 @@ def send_web_push(subscription_info: dict, title: str, body: str, url: str) -> b
         return False
 
 
+def fetch_active_reservations_secure(headers: dict) -> list:
+    """RLS 활성화 환경에서도 안전하게 동작하도록 보안 RPC(scheduler_get_active_reservations)를 우선 호출하고, 미생성 시 REST로 폴백합니다."""
+    rpc_url = f"{SUPABASE_URL}/rest/v1/rpc/scheduler_get_active_reservations"
+    try:
+        r = requests.post(rpc_url, headers=headers, json={"p_scheduler_key": VAPID_PRIVATE_KEY}, timeout=10)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+
+    url = f"{SUPABASE_URL}/rest/v1/reservations?select=id,device_id,naver_url,business_type_id,business_id,biz_item_id,biz_name,item_name,last_slots,devices(push_subscription)&is_active=eq.true"
+    resp = requests.get(url, headers=headers, timeout=10)
+    if resp.status_code == 200:
+        return resp.json()
+    logger.error(f"Supabase 조회 실패 ({resp.status_code}): {resp.text}")
+    return []
+
+
+def update_reservation_secure(headers: dict, res_id: str, payload: dict) -> None:
+    """RLS 활성화 환경에서도 안전하게 업데이트하도록 보안 RPC(scheduler_update_reservation)를 우선 호출합니다."""
+    rpc_url = f"{SUPABASE_URL}/rest/v1/rpc/scheduler_update_reservation"
+    rpc_body = {
+        "p_scheduler_key": VAPID_PRIVATE_KEY,
+        "p_reservation_id": res_id,
+        "p_last_slots": payload.get("last_slots"),
+        "p_updated_at": payload.get("updated_at"),
+        "p_business_id": payload.get("business_id"),
+        "p_biz_item_id": payload.get("biz_item_id"),
+        "p_item_name": payload.get("item_name"),
+        "p_naver_url": payload.get("naver_url")
+    }
+    try:
+        r = requests.post(rpc_url, headers=headers, json=rpc_body, timeout=8)
+        if r.status_code == 200:
+            return
+    except Exception:
+        pass
+
+    update_url = f"{SUPABASE_URL}/rest/v1/reservations?id=eq.{res_id}"
+    requests.patch(update_url, headers=headers, json=payload, timeout=8)
+
+
 def run_supabase_multi_user():
     """Supabase에서 모든 활성 예약을 조회하여 개별 사용자 기기로 알림을 발송합니다."""
     logger.info("🌐 [Supabase 연동 모드] 다중 사용자 예약 목록 로드 중...")
@@ -418,22 +460,15 @@ def run_supabase_multi_user():
     if force_notify:
         logger.info("📢 알림 강제 전송 옵션(NOTIFY_ALWAYS=true / --force)이 활성화되었습니다.")
     
-    # Supabase REST API로 active 예약과 기기 push_subscription 조회
+    # Supabase 보안 RPC (또는 REST 폴백)로 active 예약과 기기 push_subscription 조회
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json"
     }
 
-    url = f"{SUPABASE_URL}/rest/v1/reservations?select=id,device_id,naver_url,business_type_id,business_id,biz_item_id,biz_name,item_name,last_slots,devices(push_subscription)&is_active=eq.true"
-    
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code != 200:
-            logger.error(f"Supabase 조회 실패 ({resp.status_code}): {resp.text}")
-            return
-        
-        reservations = resp.json()
+        reservations = fetch_active_reservations_secure(headers)
         logger.info(f"📋 총 {len(reservations)}개의 활성 예약 건을 모니터링합니다.")
 
         for res in reservations:
@@ -446,9 +481,8 @@ def run_supabase_multi_user():
             naver_url = res["naver_url"]
             last_slots = res.get("last_slots") or []
             device_info = res.get("devices") or {}
-            push_sub = device_info.get("push_subscription")
+            push_sub = res.get("push_subscription") or device_info.get("push_subscription")
             now_iso = get_now_kst_iso()
-            update_url = f"{SUPABASE_URL}/rest/v1/reservations?id=eq.{res_id}"
 
             if biz_type == 99:
                 # 놀티켓 / 인터파크 콘서트 취켓팅 모니터링
@@ -475,7 +509,7 @@ def run_supabase_multi_user():
                     else:
                         logger.warning(f"⚠️ [{biz_name}] 푸시 구독 토큰이 등록되지 않은 기기입니다.")
 
-                    requests.patch(update_url, headers=headers, json={
+                    update_reservation_secure(headers, res_id, {
                         "last_slots": current_seat_keys,
                         "updated_at": now_iso
                     })
@@ -485,10 +519,10 @@ def run_supabase_multi_user():
                     if last_slots:
                         logger.info(f"🔄 [놀티켓] [{biz_name}] 이전 슬롯이 매진되어 상태를 리셋합니다. (다음 취소표 발생 시 즉시 감지)")
                         payload["last_slots"] = []
-                    requests.patch(update_url, headers=headers, json=payload)
+                    update_reservation_secure(headers, res_id, payload)
                 else:
                     logger.info(f"ℹ️ [놀티켓] [{biz_name}] 이전 확인 시점과 동일합니다. (중복 알림 방지)")
-                    requests.patch(update_url, headers=headers, json={
+                    update_reservation_secure(headers, res_id, {
                         "updated_at": now_iso
                     })
                 continue
@@ -512,7 +546,7 @@ def run_supabase_multi_user():
                     else:
                         logger.warning(f"⚠️ [{biz_name}] 푸시 구독 토큰이 등록되지 않은 기기입니다.")
 
-                    requests.patch(update_url, headers=headers, json={
+                    update_reservation_secure(headers, res_id, {
                         "last_slots": current_slot_keys,
                         "updated_at": now_iso
                     })
@@ -522,10 +556,10 @@ def run_supabase_multi_user():
                     if last_slots:
                         logger.info(f"🔄 [캐치테이블] [{biz_name}] 이전 슬롯이 마감되어 상태를 리셋합니다. (다음 취소표 발생 시 즉시 감지)")
                         payload["last_slots"] = []
-                    requests.patch(update_url, headers=headers, json=payload)
+                    update_reservation_secure(headers, res_id, payload)
                 else:
                     logger.info(f"ℹ️ [캐치테이블] [{biz_name}] 이전 확인 시점과 동일합니다. (중복 알림 방지)")
-                    requests.patch(update_url, headers=headers, json={
+                    update_reservation_secure(headers, res_id, {
                         "updated_at": now_iso
                     })
                 continue
@@ -572,7 +606,7 @@ def run_supabase_multi_user():
                     logger.warning(f"⚠️ [{biz_name}] 푸시 구독 토큰이 등록되지 않은 기기입니다.")
 
                 # 2) Supabase last_slots 상태 업데이트
-                requests.patch(update_url, headers=headers, json={
+                update_reservation_secure(headers, res_id, {
                     **extra_patch,
                     "last_slots": current_slot_keys,
                     "updated_at": now_iso
@@ -583,10 +617,10 @@ def run_supabase_multi_user():
                 if last_slots:
                     logger.info(f"🔄 [{biz_name}] 이전 슬롯이 마감되어 상태를 리셋합니다. (다음 취소표 발생 시 즉시 감지)")
                     payload["last_slots"] = []
-                requests.patch(update_url, headers=headers, json=payload)
+                update_reservation_secure(headers, res_id, payload)
             else:
                 logger.info(f"ℹ️ [{biz_name}] 이전 확인 시점과 최단 빈자리가 동일합니다. (중복 알림 방지)")
-                requests.patch(update_url, headers=headers, json={
+                update_reservation_secure(headers, res_id, {
                     **extra_patch,
                     "updated_at": now_iso
                 })

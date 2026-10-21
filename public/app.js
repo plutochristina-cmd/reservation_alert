@@ -364,22 +364,26 @@ async function loadReservations() {
 
     if (resp.ok) {
       const items = await resp.json();
-      try {
-        const uResp = await fetch(`${SUPABASE_URL}/rest/v1/reservations?select=id,updated_at`, {
-          headers: {
-            "apikey": SUPABASE_ANON_KEY,
-            "Authorization": `Bearer ${SUPABASE_ANON_KEY}`
-          }
-        });
-        if (uResp.ok) {
-          const uData = await uResp.json();
-          const uMap = {};
-          uData.forEach(u => { uMap[u.id] = u.updated_at; });
-          items.forEach(it => {
-            if (uMap[it.id]) it.updated_at = uMap[it.id];
+      // get_my_reservations RPC에 updated_at이 이미 포함되어 있으면 별도 테이블 조회 불필요 (RLS 완벽 호환)
+      const needsFallbackQuery = items.length > 0 && items.some(it => typeof it.updated_at === "undefined");
+      if (needsFallbackQuery) {
+        try {
+          const uResp = await fetch(`${SUPABASE_URL}/rest/v1/reservations?select=id,updated_at`, {
+            headers: {
+              "apikey": SUPABASE_ANON_KEY,
+              "Authorization": `Bearer ${SUPABASE_ANON_KEY}`
+            }
           });
-        }
-      } catch (err) {}
+          if (uResp.ok) {
+            const uData = await uResp.json();
+            const uMap = {};
+            uData.forEach(u => { uMap[u.id] = u.updated_at; });
+            items.forEach(it => {
+              if (uMap[it.id]) it.updated_at = uMap[it.id];
+            });
+          }
+        } catch (err) {}
+      }
       return items;
     }
   } catch (e) {
