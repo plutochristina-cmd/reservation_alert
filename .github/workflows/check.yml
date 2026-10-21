@@ -2,8 +2,8 @@ name: Naver Booking Multi-User Monitor
 
 on:
   schedule:
-    # 매시간 22분, 39분 자동 실행 (정각/30분 트래픽 집중 회피 및 큐 드롭 대비 이중화)
-    - cron: '22,39 * * * *'
+    # 매시간 37분(소수 단위 비혼잡 시간) 1회 자동 실행 (*/5, */10, */15, */20, */30 주기와 겹치지 않는 최적 시간)
+    - cron: '37 * * * *'
   # GitHub 웹 화면에서 수동으로 즉시 실행 가능
   workflow_dispatch:
     inputs:
