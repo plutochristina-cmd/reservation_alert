@@ -2,8 +2,8 @@ name: Naver Booking Multi-User Monitor
 
 on:
   schedule:
-    # 매시간 22분 자동 실행 (정각/30분 트래픽 집중 및 큐 딜레이 방지 최적화)
-    - cron: '22 * * * *'
+    # 매시간 22분, 39분 자동 실행 (정각/30분 트래픽 집중 회피 및 큐 드롭 대비 이중화)
+    - cron: '22,39 * * * *'
   # GitHub 웹 화면에서 수동으로 즉시 실행 가능
   workflow_dispatch:
     inputs:
@@ -52,3 +52,4 @@ jobs:
           NOTIFY_ALWAYS: ${{ github.event.inputs.force_notify || 'false' }}
         run: |
           python scheduler.py
+          curl -fsS --max-time 25 "https://naver-reserve-alert.vercel.app/api/cron" || true

@@ -64,6 +64,13 @@ async function runAllTests() {
     assert(true, "scheduler.py 컴파일 및 문법 검사 통과");
     execSync('python -m py_compile public/api/catchtable.py', { stdio: 'pipe' });
     assert(true, "public/api/catchtable.py 컴파일 및 문법 검사 통과");
+    execSync('python -m py_compile public/api/cron.py', { stdio: 'pipe' });
+    assert(true, "public/api/cron.py (Vercel Cron 엔드포인트) 컴파일 및 문법 검사 통과");
+    const tzAndVaultCheck = execSync(
+      'python -c "import os, vault, scheduler; os.environ[\'TEST_EMPTY_ENV\']=\'\'; assert vault.get_secret(\'TEST_EMPTY_ENV\', \'fallback_ok\') == \'fallback_ok\'; assert \'+09:00\' in scheduler.get_now_kst_iso(); print(\'OK\')"',
+      { encoding: 'utf-8' }
+    ).trim();
+    assert(tzAndVaultCheck === 'OK', "vault 빈 환경변수 폴백 방어 및 scheduler KST(+09:00) ISO 타임스탬프 검증 통과");
   } catch (e) {
     assert(false, `파이썬 구문 오류: ${e.message}`);
   }

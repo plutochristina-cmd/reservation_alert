@@ -71,11 +71,14 @@ def get_secret(key: str, default: str = "") -> str:
     """암호화된 볼트에서 복호화하여 값을 반환합니다. 없을 경우 os.environ에서 조회합니다."""
     # 1. 볼트 파일에서 복호화 시도
     secrets = load_all_secrets()
-    if key in secrets and secrets[key]:
-        return secrets[key]
+    if key in secrets and secrets[key] and str(secrets[key]).strip():
+        return str(secrets[key]).strip()
 
-    # 2. 시스템 환경변수에서 폴백 조회 (GitHub Actions 등)
-    return os.environ.get(key, default)
+    # 2. 시스템 환경변수에서 폴백 조회 (GitHub Actions 등에서 빈 문자열("")이 주입된 경우 default로 안전하게 폴백)
+    env_val = (os.environ.get(key) or "").strip()
+    if env_val:
+        return env_val
+    return default
 
 
 def load_all_secrets() -> dict:

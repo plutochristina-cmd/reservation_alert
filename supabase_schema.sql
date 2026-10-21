@@ -191,3 +191,25 @@ BEGIN
     RETURN FOUND;
 END;
 $$;
+
+-- =========================================================================
+-- (6) 클라우드 무인 크론 자동 트리거 (pg_cron + pg_net)
+-- 매시 22분, 39분마다 Vercel 서버리스 크론(/api/cron)을 오차 없이 호출합니다.
+-- =========================================================================
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+CREATE EXTENSION IF NOT EXISTS pg_net;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'vercel-reservation-cron-22-39') THEN
+        PERFORM cron.unschedule('vercel-reservation-cron-22-39');
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    NULL;
+END $$;
+
+SELECT cron.schedule(
+    'vercel-reservation-cron-22-39',
+    '22,39 * * * *',
+    $$SELECT net.http_get('https://naver-reserve-alert.vercel.app/api/cron');$$
+);

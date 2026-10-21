@@ -768,7 +768,7 @@ function renderReservationCard(res) {
   return card;
 }
 
-async function renderReservationsList() {
+async function renderReservationsList(skipAutoCron = false) {
   const container = document.getElementById("reservations-list");
   const emptyState = document.getElementById("empty-state");
   container.innerHTML = "";
@@ -783,6 +783,27 @@ async function renderReservationsList() {
     list.forEach(res => {
       container.appendChild(renderReservationCard(res));
     });
+
+    // 활성 예약 중 마지막 확인 시각(updated_at)이 35분 이상 경과했으면 백그라운드로 Vercel /api/cron 자동 호출 후 갱신
+    if (!skipAutoCron && typeof fetch === "function") {
+      const nowMs = Date.now();
+      const needsCronSync = list.some(r => {
+        if (!r.is_active) return false;
+        if (!r.updated_at) return true;
+        const diffMin = (nowMs - new Date(r.updated_at).getTime()) / 60000;
+        return diffMin >= 35;
+      });
+      if (needsCronSync) {
+        fetch(`${API_BASE_URL}/api/cron`)
+          .then(r => r.ok ? r.json() : null)
+          .then(data => {
+            if (data && data.ok) {
+              renderReservationsList(true);
+            }
+          })
+          .catch(() => {});
+      }
+    }
   }
 }
 

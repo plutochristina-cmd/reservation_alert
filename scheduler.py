@@ -26,6 +26,13 @@ def get_now_kst() -> datetime:
     return datetime.now(KST).replace(tzinfo=None)
 
 
+def get_now_kst_iso() -> str:
+    """Supabase TIMESTAMPTZ 컬럼 저장용 KST(+09:00) 오프셋 포함 ISO-8601 문자열을 반환합니다.
+    타임존 오프셋(+09:00)을 명시하여 DB(UTC) 저장 후 브라우저 조회 시 +9시간이 중복 가산되는 문제를 방지합니다.
+    """
+    return datetime.now(KST).isoformat()
+
+
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -182,6 +189,9 @@ def scan_available_slots(biz_type_id: int, biz_id: str, item_id: str, start_dt: 
                     "remain_stock": remain,
                     "korean_text": format_slot_korean(slot_time, remain)
                 })
+
+        if len(all_available) >= max_results:
+            break
 
         current_start = current_end + timedelta(days=1)
 
@@ -370,7 +380,7 @@ def run_supabase_multi_user():
             last_slots = res.get("last_slots") or []
             device_info = res.get("devices") or {}
             push_sub = device_info.get("push_subscription")
-            now_iso = get_now_kst().isoformat()
+            now_iso = get_now_kst_iso()
             update_url = f"{SUPABASE_URL}/rest/v1/reservations?id=eq.{res_id}"
 
             if biz_type == 99:
