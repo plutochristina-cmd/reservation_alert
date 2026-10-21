@@ -42,6 +42,10 @@ CREATE INDEX IF NOT EXISTS idx_reservations_is_active ON public.reservations(is_
 ALTER TABLE public.devices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.reservations ENABLE ROW LEVEL SECURITY;
 
+-- 2026-10-30 Supabase 신규 테이블 자동 GRANT 중단 정책 대응: 명시적 권한 부여
+GRANT ALL ON TABLE public.devices TO postgres, service_role;
+GRANT ALL ON TABLE public.reservations TO postgres, service_role;
+
 -- =========================================================================
 -- 보안 RPC 함수 (SHA-256 해시 기반 무로그인 인증)
 -- 각 사용자는 자신의 secret_hash와 일치하는 데이터만 접근 가능 (타인 간섭 100% 차단)
@@ -186,6 +190,15 @@ BEGIN
 END;
 $$;
 
+-- 2026-10-30 Supabase 정책 대응: 보안 RPC 함수 실행 권한(GRANT EXECUTE) 명시
+GRANT EXECUTE ON FUNCTION public.register_device(TEXT, JSONB) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.get_my_reservations(TEXT) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.add_reservation(TEXT, TEXT, INT, TEXT, TEXT, TEXT, TEXT) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.toggle_reservation(TEXT, UUID, BOOLEAN) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.delete_reservation(TEXT, UUID) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.scheduler_get_active_reservations(TEXT) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.scheduler_update_reservation(TEXT, UUID, JSONB, TIMESTAMPTZ, TEXT, TEXT, TEXT, TEXT) TO anon, authenticated, service_role;
+
 -- (5) 예약 삭제 (본인 소유 검증)
 CREATE OR REPLACE FUNCTION public.delete_reservation(
     p_secret_hash TEXT,
@@ -206,6 +219,15 @@ BEGIN
     RETURN FOUND;
 END;
 $$;
+
+-- 2026-10-30 Supabase 정책 대응: 보안 RPC 함수 실행 권한(GRANT EXECUTE) 명시
+GRANT EXECUTE ON FUNCTION public.register_device(TEXT, JSONB) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.get_my_reservations(TEXT) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.add_reservation(TEXT, TEXT, INT, TEXT, TEXT, TEXT, TEXT) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.toggle_reservation(TEXT, UUID, BOOLEAN) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.delete_reservation(TEXT, UUID) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.scheduler_get_active_reservations(TEXT) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.scheduler_update_reservation(TEXT, UUID, JSONB, TIMESTAMPTZ, TEXT, TEXT, TEXT, TEXT) TO anon, authenticated, service_role;
 
 -- (5-1) 스케줄러 전용: 활성 예약 전체 조회 (서버 전용 비밀키 검증)
 CREATE OR REPLACE FUNCTION public.scheduler_get_active_reservations(p_scheduler_key TEXT)
@@ -282,6 +304,15 @@ BEGIN
     RETURN FOUND;
 END;
 $$;
+
+-- 2026-10-30 Supabase 정책 대응: 보안 RPC 함수 실행 권한(GRANT EXECUTE) 명시
+GRANT EXECUTE ON FUNCTION public.register_device(TEXT, JSONB) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.get_my_reservations(TEXT) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.add_reservation(TEXT, TEXT, INT, TEXT, TEXT, TEXT, TEXT) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.toggle_reservation(TEXT, UUID, BOOLEAN) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.delete_reservation(TEXT, UUID) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.scheduler_get_active_reservations(TEXT) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.scheduler_update_reservation(TEXT, UUID, JSONB, TIMESTAMPTZ, TEXT, TEXT, TEXT, TEXT) TO anon, authenticated, service_role;
 
 -- =========================================================================
 -- (6) 클라우드 무인 크론 자동 트리거 (pg_cron + pg_net)
