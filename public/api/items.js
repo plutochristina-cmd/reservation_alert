@@ -69,7 +69,11 @@ module.exports = async function handler(req, res) {
           });
           if (pResp.ok) {
             const pText = await pResp.text();
-            const match = pText.match(/booking\.naver\.com\/(?:m\/)?booking\/(\d+)\/bizes\/(\d+)/) || pText.match(/bizes\/(\d+)/);
+            const unescaped = pText.replace(/\\u002F/gi, '/').replace(/\\\//g, '/');
+            const match =
+              unescaped.match(/booking\.naver\.com\/(?:m\/)?booking\/(\d+)\/bizes\/(\d+)/i) ||
+              unescaped.match(/"bookingBusinessId"\s*:\s*"?(\d+)"?/i) ||
+              unescaped.match(/bizes\/(\d+)/i);
             if (match) {
               if (match[2]) {
                 resolvedTypeId = parseInt(match[1], 10);

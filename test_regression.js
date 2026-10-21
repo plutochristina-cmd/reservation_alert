@@ -196,6 +196,19 @@ async function runAllTests() {
 
     assert(isResolvedBiz, "프롭비한의원 Place ID(1480163218) -> 예약 비즈니스 ID(587100) 자동 변환 성공");
     assert(hasBothDoctors, `프롭비한의원 두 분의 원장님(김민희진료원장, 장정현대표원장) 목록 정상 추출 (${itemsResult?.items?.length}명)`);
+
+    let lucyResult = null;
+    await new Promise((resolve) => {
+      const req = { query: { businessId: '2008574666' }, method: 'GET' };
+      const res = {
+        setHeader: () => {},
+        status: () => ({
+          json: (data) => { lucyResult = data; resolve(); }
+        })
+      };
+      itemsHandler(req, res);
+    });
+    assert(lucyResult && lucyResult.businessId === '1474503' && lucyResult.items?.some(i => i.id === '6971667'), "루시타로&사주 Place ID(2008574666) -> 예약 비즈니스 ID(1474503) 및 대표 루시쌤(6971667) 역추적 성공");
   } catch (err) {
     assert(false, `items.js API 테스트 중 오류: ${err.message}`);
   }

@@ -25,38 +25,66 @@ module.exports = async function handler(req, res) {
     };
 
     let resolvedBizId = targetBizId;
+    let resolvedItemId = targetItemId;
 
-    // Place ID인 경우 booking businessId 역추적 (items.js와 동일한 로직)
+    // Place ID인 경우 booking businessId 역추적 및 기본 itemId('1') 자동 보정
     const checkQuery = `
       query getBiz($businessId: String!) {
         business(input: {businessId: $businessId, lang: "ko"}) {
           name
         }
+        bizItems(input: {businessId: $businessId, lang: "ko"}) {
+          id
+          name
+        }
       }
     `;
-    const checkResp = await fetch('https://booking.naver.com/graphql', {
+    let checkResp = await fetch('https://booking.naver.com/graphql', {
       method: 'POST',
       headers,
       body: JSON.stringify({ query: checkQuery, variables: { businessId: resolvedBizId } })
     });
-    const checkJson = checkResp.ok ? await checkResp.json() : null;
+    let checkJson = checkResp.ok ? await checkResp.json() : null;
 
     if (!checkJson?.data?.business) {
-      // 플레이스 페이지에서 bookingId 추출 시도
-      try {
-        const placeResp = await fetch(`https://m.place.naver.com/place/${resolvedBizId}/booking`, {
-          headers: { 'User-Agent': headers['User-Agent'] }
-        });
-        if (placeResp.ok) {
-          const text = await placeResp.text();
-          const match = text.match(/booking\.naver\.com\/booking\/\d+\/bizes\/(\d+)/i) ||
-                        text.match(/bizes\/(\d+)/i) ||
-                        text.match(/"businessId":\s*"?(\d+)"?/i);
-          if (match && match[1] && match[1] !== resolvedBizId) {
-            resolvedBizId = match[1];
+      // 플레이스 페이지에서 bookingId 추출 시도 (/booking 및 /home 모두 확인, \u002F 이스케이프 해제)
+      for (const suffix of ['booking', 'home']) {
+        try {
+          const placeResp = await fetch(`https://m.place.naver.com/place/${resolvedBizId}/${suffix}`, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1',
+              'Referer': 'https://m.place.naver.com/'
+            }
+          });
+          if (placeResp.ok) {
+            const rawText = await placeResp.text();
+            const text = rawText.replace(/\\u002F/gi, '/').replace(/\\\//g, '/');
+            const match = text.match(/booking\.naver\.com\/(?:m\/)?booking\/\d+\/bizes\/(\d+)/i) ||
+                          text.match(/"bookingBusinessId"\s*:\s*"?(\d+)"?/i) ||
+                          text.match(/bizes\/(\d+)/i) ||
+                          text.match(/"businessId"\s*:\s*"?(\d+)"?/i);
+            if (match && match[1] && match[1] !== resolvedBizId) {
+              resolvedBizId = match[1];
+              break;
+            }
           }
-        }
-      } catch (e) {}
+        } catch (e) {}
+      }
+
+      if (resolvedBizId !== targetBizId) {
+        checkResp = await fetch('https://booking.naver.com/graphql', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ query: checkQuery, variables: { businessId: resolvedBizId } })
+        });
+        checkJson = checkResp.ok ? await checkResp.json() : null;
+      }
+    }
+
+    // bizItemId가 '1' 등 임시값인 경우 첫 번째 실제 상품 ID로 자동 매핑
+    const bizItemsList = checkJson?.data?.bizItems || [];
+    if ((resolvedItemId === '1' || !resolvedItemId) && bizItemsList.length > 0) {
+      resolvedItemId = String(bizItemsList[0].id || '').split('_')[0];
     }
 
     // 슬롯 조회 기간 계산 (KST 한국 표준시 기준: 기본값 오늘 ~ 35일 후)
@@ -92,7 +120,7 @@ module.exports = async function handler(req, res) {
       scheduleParams: {
         businessTypeId: targetTypeId,
         businessId: resolvedBizId,
-        bizItemId: targetItemId,
+        bizItemId: resolvedItemId,
         startDateTime: `${startStr}T00:00:00`,
         endDateTime: `${endStr}T23:59:59`,
         fixedTime: true,
@@ -105,7 +133,7 @@ module.exports = async function handler(req, res) {
       headers: {
         ...headers,
         'Origin': 'https://booking.naver.com',
-        'Referer': `https://booking.naver.com/booking/${targetTypeId}/bizes/${resolvedBizId}/items/${targetItemId}`
+        'Referer': `https://booking.naver.com/booking/${targetTypeId}/bizes/${resolvedBizId}/items/${resolvedItemId}`
       },
       body: JSON.stringify({ query, variables })
     });

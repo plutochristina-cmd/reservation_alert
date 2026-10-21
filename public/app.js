@@ -547,9 +547,29 @@ function renderReservationCard(res) {
   const isNol = (res.business_type_id === 99);
   const isCatchTable = (res.business_type_id === 88);
 
-  const lastSlotText = res.last_slots && res.last_slots.length > 0 
-    ? res.last_slots[0] 
-    : (isCatchTable ? "캐치테이블 빈자리 감시 대기 중" : (isNol ? "실시간 취켓팅 감시 대기 중" : "아직 확인 전 (스케줄러 대기 중)"));
+  let lastSlotText = "";
+  let isNoneState = false;
+  if (res.last_slots && res.last_slots.length > 0) {
+    const rawSlot = String(res.last_slots[0]);
+    const mSlot = rawSlot.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
+    if (mSlot) {
+      const wkNames = ["일", "월", "화", "수", "목", "금", "토"];
+      const dObj = new Date(Number(mSlot[1]), Number(mSlot[2]) - 1, Number(mSlot[3]));
+      const wk = wkNames[dObj.getDay()];
+      lastSlotText = `${mSlot[1]}년 ${mSlot[2]}월 ${mSlot[3]}일 (${wk}) ${mSlot[4]}:${mSlot[5]} 예약 가능`;
+    } else {
+      lastSlotText = rawSlot;
+    }
+  } else if (res.updated_at) {
+    isNoneState = true;
+    lastSlotText = isCatchTable
+      ? "현재 예약 가능한 일정 없음 (실시간 감시 중)"
+      : (isNol ? "현재 전석 매진 (취소표 실시간 감시 중)" : "지정 기간 내 빈자리 없음 (자동 감시 중)");
+  } else {
+    lastSlotText = isCatchTable
+      ? "캐치테이블 빈자리 감시 대기 중"
+      : (isNol ? "실시간 취켓팅 감시 대기 중" : "아직 확인 전 (스케줄러 대기 중)");
+  }
 
   // URL에서 startDate, endDate 추출
   let periodBadgeHtml = "";
@@ -641,8 +661,8 @@ function renderReservationCard(res) {
         <span class="slot-label">${isCatchTable ? "캐치테이블 실시간 예약 가능 일자" : (isNol ? "실시간 취소표 잔여석 현황" : "가장 빠른 예약 가능 일시")}</span>
         <span class="cycle-pill">⏱️ 1시간 주기 자동 감시 중${lastCheckedDesc}</span>
       </div>
-      <div class="slot-value" id="slot-text-${res.id}">
-        ✨ ${lastSlotText}
+      <div class="slot-value${isNoneState ? " none" : ""}" id="slot-text-${res.id}">
+        ${isNoneState ? "❌" : "✨"} ${lastSlotText}
       </div>
     </div>
 

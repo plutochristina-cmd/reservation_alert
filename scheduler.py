@@ -68,6 +68,73 @@ def format_slot_korean(dt: datetime, remain: int) -> str:
     return f"{dt.strftime('%Y년 %m월 %d일')} ({weekday}) {dt.strftime('%H:%M')} (잔여: {remain}자리)"
 
 
+def resolve_naver_booking_ids(biz_id: str, item_id: str) -> tuple[str, str, str]:
+    """네이버 플레이스 ID 또는 임시 상품 ID('1')가 저장된 경우 실제 예약 businessId, bizItemId, itemName으로 역추적합니다."""
+    import re
+    resolved_biz = str(biz_id).strip()
+    resolved_item = str(item_id or "1").strip()
+    resolved_item_name = ""
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://booking.naver.com/",
+        "Content-Type": "application/json"
+    }
+    query = """
+    query getBusinessBooking($businessId: String!) {
+      business(input: {businessId: $businessId, lang: "ko"}) {
+        name
+      }
+      bizItems(input: {businessId: $businessId, lang: "ko"}) {
+        id
+        name
+      }
+    }
+    """
+    try:
+        r = requests.post(GRAPHQL_ENDPOINT, headers=headers, json={"query": query, "variables": {"businessId": resolved_biz}}, timeout=8)
+        data = r.json().get("data", {}) if r.status_code == 200 else {}
+        biz = data.get("business")
+        items = data.get("bizItems") or []
+
+        if not biz or not items:
+            for suffix in ["booking", "home"]:
+                try:
+                    pr = requests.get(
+                        f"https://m.place.naver.com/place/{resolved_biz}/{suffix}",
+                        headers={
+                            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+                            "Referer": "https://m.place.naver.com/"
+                        },
+                        timeout=8
+                    )
+                    if pr.status_code == 200:
+                        txt = pr.text.replace("\\u002F", "/").replace("\\u002f", "/").replace("\\/", "/")
+                        m = (
+                            re.search(r'booking\.naver\.com/(?:m/)?booking/\d+/bizes/(\d+)', txt, re.I)
+                            or re.search(r'"bookingBusinessId"\s*:\s*"?(\d+)"?', txt, re.I)
+                            or re.search(r'bizes/(\d+)', txt, re.I)
+                        )
+                        if m and m.group(1) != resolved_biz:
+                            resolved_biz = m.group(1)
+                            break
+                except Exception:
+                    pass
+
+            if resolved_biz != str(biz_id).strip():
+                r2 = requests.post(GRAPHQL_ENDPOINT, headers=headers, json={"query": query, "variables": {"businessId": resolved_biz}}, timeout=8)
+                data2 = r2.json().get("data", {}) if r2.status_code == 200 else {}
+                items = data2.get("bizItems") or []
+
+        if (resolved_item == "1" or not resolved_item) and items:
+            resolved_item = str(items[0].get("id") or "").split("_")[0]
+            resolved_item_name = str(items[0].get("name") or "")
+    except Exception as e:
+        logger.warning(f"Place ID 역추적 실패 ({biz_id}/{item_id}): {e}")
+
+    return resolved_biz, resolved_item, resolved_item_name
+
+
 def fetch_hourly_schedule(biz_type_id: int, biz_id: str, item_id: str, start_dt: datetime, end_dt: datetime) -> list:
     """네이버 GraphQL API를 통해 시간별 슬롯 데이터를 조회합니다."""
     query = """
@@ -464,6 +531,22 @@ def run_supabase_multi_user():
                 continue
 
             # 일반 네이버 예약 모니터링
+            extra_patch = {}
+            if str(item_id) == "1" or len(str(biz_id)) >= 8:
+                r_biz, r_item, r_item_name = resolve_naver_booking_ids(biz_id, item_id)
+                if r_biz != str(biz_id) or r_item != str(item_id):
+                    logger.info(f"🔧 [{biz_name}] 플레이스 ID 자동 보정: {biz_id}/{item_id} -> {r_biz}/{r_item} ({r_item_name})")
+                    naver_url = naver_url.replace(f"/bizes/{biz_id}/items/{item_id}", f"/bizes/{r_biz}/items/{r_item}")
+                    biz_id, item_id = r_biz, r_item
+                    extra_patch = {
+                        "business_id": biz_id,
+                        "biz_item_id": item_id,
+                        "naver_url": naver_url
+                    }
+                    if r_item_name and item_name == "기본 예약":
+                        item_name = r_item_name
+                        extra_patch["item_name"] = item_name
+
             start_dt, end_dt = parse_date_range_from_url(naver_url)
             days_span = (end_dt - start_dt).days + 1
             date_range_desc = f"{start_dt.strftime('%m/%d')}~{end_dt.strftime('%m/%d')} ({days_span}일간)"
@@ -490,12 +573,13 @@ def run_supabase_multi_user():
 
                 # 2) Supabase last_slots 상태 업데이트
                 requests.patch(update_url, headers=headers, json={
+                    **extra_patch,
                     "last_slots": current_slot_keys,
                     "updated_at": now_iso
                 })
             elif not top_slots:
                 logger.info(f"❌ [{biz_name}] 지정 기간({date_range_desc}) 내 빈자리가 없습니다.")
-                payload = {"updated_at": now_iso}
+                payload = {**extra_patch, "updated_at": now_iso}
                 if last_slots:
                     logger.info(f"🔄 [{biz_name}] 이전 슬롯이 마감되어 상태를 리셋합니다. (다음 취소표 발생 시 즉시 감지)")
                     payload["last_slots"] = []
@@ -503,6 +587,7 @@ def run_supabase_multi_user():
             else:
                 logger.info(f"ℹ️ [{biz_name}] 이전 확인 시점과 최단 빈자리가 동일합니다. (중복 알림 방지)")
                 requests.patch(update_url, headers=headers, json={
+                    **extra_patch,
                     "updated_at": now_iso
                 })
 

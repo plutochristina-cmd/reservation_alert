@@ -50,6 +50,71 @@ def format_slot_korean(dt: datetime, remain: int) -> str:
     return f"{dt.strftime('%Y년 %m월 %d일')} ({weekday}) {dt.strftime('%H:%M')} (잔여: {remain}자리)"
 
 
+def resolve_naver_booking_ids(biz_id: str, item_id: str) -> tuple:
+    resolved_biz = str(biz_id).strip()
+    resolved_item = str(item_id or "1").strip()
+    resolved_item_name = ""
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://booking.naver.com/",
+        "Content-Type": "application/json"
+    }
+    query = """
+    query getBusinessBooking($businessId: String!) {
+      business(input: {businessId: $businessId, lang: "ko"}) {
+        name
+      }
+      bizItems(input: {businessId: $businessId, lang: "ko"}) {
+        id
+        name
+      }
+    }
+    """
+    try:
+        r = requests.post(GRAPHQL_ENDPOINT, headers=headers, json={"query": query, "variables": {"businessId": resolved_biz}}, timeout=6)
+        data = r.json().get("data", {}) if r.status_code == 200 else {}
+        biz = data.get("business")
+        items = data.get("bizItems") or []
+
+        if not biz or not items:
+            for suffix in ["booking", "home"]:
+                try:
+                    pr = requests.get(
+                        f"https://m.place.naver.com/place/{resolved_biz}/{suffix}",
+                        headers={
+                            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+                            "Referer": "https://m.place.naver.com/"
+                        },
+                        timeout=6
+                    )
+                    if pr.status_code == 200:
+                        txt = pr.text.replace("\\u002F", "/").replace("\\u002f", "/").replace("\\/", "/")
+                        m = (
+                            re.search(r'booking\.naver\.com/(?:m/)?booking/\d+/bizes/(\d+)', txt, re.I)
+                            or re.search(r'"bookingBusinessId"\s*:\s*"?(\d+)"?', txt, re.I)
+                            or re.search(r'bizes/(\d+)', txt, re.I)
+                        )
+                        if m and m.group(1) != resolved_biz:
+                            resolved_biz = m.group(1)
+                            break
+                except Exception:
+                    pass
+
+            if resolved_biz != str(biz_id).strip():
+                r2 = requests.post(GRAPHQL_ENDPOINT, headers=headers, json={"query": query, "variables": {"businessId": resolved_biz}}, timeout=6)
+                data2 = r2.json().get("data", {}) if r2.status_code == 200 else {}
+                items = data2.get("bizItems") or []
+
+        if (resolved_item == "1" or not resolved_item) and items:
+            resolved_item = str(items[0].get("id") or "").split("_")[0]
+            resolved_item_name = str(items[0].get("name") or "")
+    except Exception:
+        pass
+
+    return resolved_biz, resolved_item, resolved_item_name
+
+
 def fetch_hourly_schedule(biz_type_id: int, biz_id: str, item_id: str, start_dt: datetime, end_dt: datetime) -> list:
     query = """
     query hourlySchedule($scheduleParams: ScheduleParams) {
@@ -346,6 +411,21 @@ def execute_multi_user_scan(force_notify: bool = False) -> dict:
             summary.append({"id": res_id, "biz_name": biz_name, "found": len(top_slots), "pushed": pushed, "updated_at": now_iso})
             continue
 
+        extra_patch = {}
+        if str(item_id) == "1" or len(str(biz_id)) >= 8:
+            r_biz, r_item, r_item_name = resolve_naver_booking_ids(biz_id, item_id)
+            if r_biz != str(biz_id) or r_item != str(item_id):
+                naver_url = naver_url.replace(f"/bizes/{biz_id}/items/{item_id}", f"/bizes/{r_biz}/items/{r_item}")
+                biz_id, item_id = r_biz, r_item
+                extra_patch = {
+                    "business_id": biz_id,
+                    "biz_item_id": item_id,
+                    "naver_url": naver_url
+                }
+                if r_item_name and item_name == "기본 예약":
+                    item_name = r_item_name
+                    extra_patch["item_name"] = item_name
+
         start_dt, end_dt = parse_date_range_from_url(naver_url)
         days_span = (end_dt - start_dt).days + 1
         date_range_desc = f"{start_dt.strftime('%m/%d')}~{end_dt.strftime('%m/%d')} ({days_span}일간)"
@@ -360,14 +440,14 @@ def execute_multi_user_scan(force_notify: bool = False) -> dict:
                 body += f"\n외 {len(top_slots)-1}개 슬롯 가능"
             if push_sub:
                 pushed = send_web_push(push_sub, title, body, naver_url)
-            requests.patch(update_url, headers=headers, json={"last_slots": current_keys, "updated_at": now_iso}, timeout=8)
+            requests.patch(update_url, headers=headers, json={**extra_patch, "last_slots": current_keys, "updated_at": now_iso}, timeout=8)
         elif not top_slots:
-            payload = {"updated_at": now_iso}
+            payload = {**extra_patch, "updated_at": now_iso}
             if last_slots:
                 payload["last_slots"] = []
             requests.patch(update_url, headers=headers, json=payload, timeout=8)
         else:
-            requests.patch(update_url, headers=headers, json={"updated_at": now_iso}, timeout=8)
+            requests.patch(update_url, headers=headers, json={**extra_patch, "updated_at": now_iso}, timeout=8)
 
         summary.append({"id": res_id, "biz_name": biz_name, "found": len(top_slots), "pushed": pushed, "updated_at": now_iso})
 
