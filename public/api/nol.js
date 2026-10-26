@@ -26,16 +26,24 @@ async function fetchConcertSummary(cleanCode) {
   }
 }
 
-async function fetchCastCredits(cleanCode) {
+async function fetchProductPageInfo(cleanCode) {
   try {
     const url = `https://nol.yanolja.com/ticket/products/${cleanCode}`;
     const resp = await fetch(url, { headers: HEADERS });
-    if (!resp.ok) return [];
+    if (!resp.ok) return { title: '', casts: [] };
     const html = await resp.text();
+
+    let title = '';
+    const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+    if (titleMatch && titleMatch[1]) {
+      const rawTitle = titleMatch[1].split('|')[0].trim();
+      title = rawTitle.replace(/\s*-\s*[^|]+$/i, '').trim() || rawTitle;
+    }
+
     const idx = html.indexOf('castCredits');
-    if (idx === -1) return [];
+    if (idx === -1) return { title, casts: [] };
     const startIdx = html.indexOf('[', idx);
-    if (startIdx === -1) return [];
+    if (startIdx === -1) return { title, casts: [] };
     let depth = 0;
     let endIdx = -1;
     for (let i = startIdx; i < html.length && i < startIdx + 30000; i++) {
@@ -48,7 +56,7 @@ async function fetchCastCredits(cleanCode) {
         }
       }
     }
-    if (endIdx === -1) return [];
+    if (endIdx === -1) return { title, casts: [] };
     const rawSlice = html.substring(startIdx, endIdx + 1);
     const jsonStr = rawSlice.replace(/\\"/g, '"');
     const casts = JSON.parse(jsonStr);
@@ -65,9 +73,9 @@ async function fetchCastCredits(cleanCode) {
         });
       }
     });
-    return unique;
+    return { title, casts: unique };
   } catch (e) {
-    return [];
+    return { title: '', casts: [] };
   }
 }
 
@@ -128,11 +136,12 @@ module.exports = async function handler(req, res) {
   const cleanCode = codeMatch ? codeMatch[1] : String(rawTarget).trim();
 
   try {
-    // 1) 기본 요약 정보 및 출연진(캐스트) 정보 조회
-    const [summaryData, castsData] = await Promise.all([
+    // 1) 기본 요약 정보 및 페이지 정보(공연명, 출연진) 병렬 조회
+    const [summaryData, pageInfo] = await Promise.all([
       fetchConcertSummary(cleanCode),
-      fetchCastCredits(cleanCode)
+      fetchProductPageInfo(cleanCode)
     ]);
+    const preset = POPULAR_CONCERTS.find(p => p.goodsCode === cleanCode);
 
     // 2) 각 회차별 잔여석 실시간 조회 (001, 002, 003...)
     const sessions = [];
@@ -179,13 +188,13 @@ module.exports = async function handler(req, res) {
 
     return res.status(200).json({
       goodsCode: cleanCode,
-      goodsName: summaryData?.goodsName || `놀티켓 공연 (#${cleanCode})`,
-      placeCode: summaryData?.placeCode || '',
-      placeName: summaryData?.placeName || '',
+      goodsName: summaryData?.goodsName || pageInfo.title || preset?.title || `놀티켓 공연 (#${cleanCode})`,
+      placeCode: summaryData?.placeCode || preset?.placeCode || '',
+      placeName: summaryData?.placeName || preset?.placeName || '',
       playStartDate: summaryData?.playStartDate || '',
       playEndDate: summaryData?.playEndDate || '',
       playTime: summaryData?.playTime || '',
-      casts: castsData || [],
+      casts: pageInfo.casts || [],
       sessions: enrichedSessions
     });
   } catch (error) {
