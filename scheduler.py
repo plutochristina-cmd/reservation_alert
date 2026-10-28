@@ -135,6 +135,178 @@ def resolve_naver_booking_ids(biz_id: str, item_id: str) -> tuple[str, str, str]
     return resolved_biz, resolved_item, resolved_item_name
 
 
+def fetch_booking_rules(biz_id: str, item_id: str) -> dict:
+    """네이버 GraphQL API에서 매장 및 상품별 예약 마감 규칙(RI01/RI02/RI03), 최소 인원/이용시간, 마감 설정을 조회합니다."""
+    query = """
+    query getBookingRules($businessId: String!, $bizItemId: String!) {
+      business(input: {businessId: $businessId, lang: "ko"}) {
+        bookingAvailableCode
+        bookingAvailableValue
+        bookingTimeUnitCode
+      }
+      bizItem(input: {businessId: $businessId, bizItemId: $bizItemId, lang: "ko"}) {
+        bookingAvailableCode
+        bookingAvailableValue
+        bookingTimeUnitCode
+        minBookingCount
+        maxBookingCount
+        minBookingTime
+        maxBookingTime
+        bookableSettingJson
+      }
+    }
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://booking.naver.com/",
+        "Origin": "https://booking.naver.com",
+        "Content-Type": "application/json"
+    }
+    try:
+        resp = requests.post(
+            GRAPHQL_ENDPOINT,
+            headers=headers,
+            json={"query": query, "variables": {"businessId": str(biz_id), "bizItemId": str(item_id)}},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json().get("data") or {}
+            return {
+                "business": data.get("business") or {},
+                "bizItem": data.get("bizItem") or {}
+            }
+    except Exception as e:
+        logger.debug(f"예약 마감 규칙 조회 경고 ({biz_id}/{item_id}): {e}")
+    return {"business": {}, "bizItem": {}}
+
+
+def compute_min_bookable_dt(now: datetime, rules: dict, safety_buffer_minutes: int = 5) -> datetime:
+    """네이버 예약 공식 마감 규칙(RI01/RI02/RI03) + 안전 버퍼(기본 5분)를 결합하여 최소 예약 가능 시각을 계산합니다."""
+    effective_now = now + timedelta(minutes=safety_buffer_minutes)
+    biz = (rules or {}).get("business") or {}
+    item = (rules or {}).get("bizItem") or {}
+
+    biz_code = biz.get("bookingAvailableCode")
+    item_code = item.get("bookingAvailableCode")
+    if biz_code and biz_code != "RI01":
+        avail_code = biz_code
+        avail_val = int(biz.get("bookingAvailableValue") or 0)
+    else:
+        avail_code = item_code or biz_code or "RI01"
+        raw_val = item.get("bookingAvailableValue") if item.get("bookingAvailableValue") is not None else biz.get("bookingAvailableValue")
+        avail_val = int(raw_val or 0)
+
+    if avail_code == "RI02":
+        days_ahead = max(avail_val, 1)
+        start_of_today = effective_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return max(effective_now, start_of_today + timedelta(days=days_ahead))
+    elif avail_code == "RI03":
+        raw_cutoff = effective_now + timedelta(hours=avail_val)
+        end_of_today = effective_now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        capped_cutoff = end_of_today if raw_cutoff.date() > effective_now.date() else raw_cutoff
+        return max(effective_now, capped_cutoff)
+    return effective_now
+
+
+def filter_naver_hourly_slots(slots: list, now: datetime, rules: dict = None, start_dt: datetime = None, end_dt: datetime = None, safety_buffer_minutes: int = 5) -> list:
+    """네이버 예약 프론트엔드(KK/Yg/Ft/nX/maxBookingTime)와 동일한 조건 + 5분 안전 버퍼로 유효 슬롯만 필터링합니다."""
+    effective_now = now + timedelta(minutes=safety_buffer_minutes)
+    min_bookable_dt = compute_min_bookable_dt(now, rules or {}, safety_buffer_minutes=safety_buffer_minutes)
+
+    biz = (rules or {}).get("business") or {}
+    item = (rules or {}).get("bizItem") or {}
+    bookable_setting = item.get("bookableSettingJson") or {}
+    if bookable_setting.get("isOpened") is False or bookable_setting.get("isPaused") is True:
+        return []
+
+    item_min_cnt = int(item.get("minBookingCount") or 1)
+    item_min_time = int(item.get("minBookingTime") or 0)
+    time_unit_code = item.get("bookingTimeUnitCode") or biz.get("bookingTimeUnitCode") or "RT02"
+    default_duration = 30 if time_unit_code == "RT01" else 60
+
+    by_date = {}
+    for s in (slots or []):
+        slot_str = s.get("unitStartTime")
+        if not slot_str:
+            continue
+        try:
+            slot_time = datetime.strptime(slot_str, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+
+        if slot_time < min_bookable_dt:
+            continue
+        if start_dt and slot_time < start_dt:
+            continue
+        if end_dt and slot_time > end_dt:
+            continue
+
+        date_key = slot_time.strftime("%Y-%m-%d")
+
+        if bookable_setting.get("isUseClose"):
+            close_days = int(bookable_setting.get("closeDays") or 0)
+            close_hours = int(bookable_setting.get("closeHours") or 0)
+            slot_day_start = slot_time.replace(hour=0, minute=0, second=0, microsecond=0)
+            close_deadline = slot_day_start - timedelta(days=close_days) + timedelta(hours=close_hours)
+            if effective_now >= close_deadline:
+                continue
+
+        is_open = bool(
+            s.get("isBusinessDay")
+            and s.get("isUnitBusinessDay")
+            and s.get("isSaleDay")
+            and s.get("isUnitSaleDay")
+            and not s.get("isHoliday")
+        )
+        unit_stock = int(s.get("unitStock") if s.get("unitStock") is not None else (s.get("stock") or 0))
+        unit_booked = int(s.get("unitBookingCount") or 0)
+        unit_remain = unit_stock - unit_booked
+        if s.get("stock") is not None:
+            total_remain = int(s.get("stock")) - int(s.get("bookingCount") or 0) - int(s.get("occupiedBookingCount") or 0)
+        else:
+            total_remain = unit_remain
+        max_allowed = int(s.get("maxBookingCount") or unit_stock)
+        remain = min(unit_remain, total_remain, max_allowed)
+        min_req = max(1, int(s.get("minBookingCount") or item_min_cnt))
+        is_bookable = is_open and (remain >= min_req)
+        duration = int(s.get("duration") or default_duration)
+
+        by_date.setdefault(date_key, []).append({
+            "datetime": slot_time,
+            "datetime_str": slot_str,
+            "remain_stock": remain,
+            "duration": duration,
+            "is_bookable": is_bookable,
+            "raw": s
+        })
+
+    valid_slots = []
+    for date_key in sorted(by_date.keys()):
+        day_entries = by_date[date_key]
+        acc_minutes = 0
+        for entry in reversed(day_entries):
+            if entry["is_bookable"]:
+                acc_minutes += entry["duration"]
+            else:
+                acc_minutes = 0
+            entry["max_booking_time"] = acc_minutes
+
+        for entry in day_entries:
+            if not entry["is_bookable"]:
+                continue
+            if item_min_time > 0 and entry["max_booking_time"] < item_min_time:
+                continue
+            valid_slots.append({
+                "datetime": entry["datetime"],
+                "datetime_str": entry["datetime_str"],
+                "remain_stock": entry["remain_stock"],
+                "korean_text": format_slot_korean(entry["datetime"], entry["remain_stock"]),
+                "raw": entry["raw"]
+            })
+
+    return valid_slots
+
+
 def fetch_hourly_schedule(biz_type_id: int, biz_id: str, item_id: str, start_dt: datetime, end_dt: datetime) -> list:
     """네이버 GraphQL API를 통해 시간별 슬롯 데이터를 조회합니다."""
     query = """
@@ -145,10 +317,17 @@ def fetch_hourly_schedule(biz_type_id: int, biz_id: str, item_id: str, start_dt:
             unitStartTime
             unitBookingCount
             unitStock
+            bookingCount
+            occupiedBookingCount
+            stock
             isBusinessDay
             isSaleDay
             isUnitSaleDay
             isUnitBusinessDay
+            isHoliday
+            duration
+            minBookingCount
+            maxBookingCount
           }
         }
       }
@@ -218,6 +397,7 @@ def scan_available_slots(biz_type_id: int, biz_id: str, item_id: str, start_dt: 
     if end_dt is None:
         end_dt = now + timedelta(days=365)
 
+    rules = fetch_booking_rules(biz_id, item_id)
     chunk_size = 60
     current_start = max(now, start_dt)
     end_limit = end_dt
@@ -227,35 +407,8 @@ def scan_available_slots(biz_type_id: int, biz_id: str, item_id: str, start_dt: 
     while current_start < end_limit:
         current_end = min(current_start + timedelta(days=chunk_size), end_limit)
         slots = fetch_hourly_schedule(biz_type_id, biz_id, item_id, current_start, current_end)
-
-        for s in slots:
-            slot_str = s.get("unitStartTime")
-            if not slot_str:
-                continue
-            try:
-                slot_time = datetime.strptime(slot_str, "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                continue
-
-            # 지정된 시작/종료 범위 및 현재 시점 필터링
-            if slot_time <= now or slot_time < start_dt or slot_time > end_dt:
-                continue
-
-            is_open = s.get("isBusinessDay") and s.get("isUnitBusinessDay") and s.get("isSaleDay") and s.get("isUnitSaleDay")
-            if not is_open:
-                continue
-
-            stock = s.get("unitStock") or 0
-            booked = s.get("unitBookingCount") or 0
-            remain = stock - booked
-
-            if remain > 0:
-                all_available.append({
-                    "datetime": slot_time,
-                    "datetime_str": slot_str,
-                    "remain_stock": remain,
-                    "korean_text": format_slot_korean(slot_time, remain)
-                })
+        filtered = filter_naver_hourly_slots(slots, now=now, rules=rules, start_dt=start_dt, end_dt=end_dt, safety_buffer_minutes=5)
+        all_available.extend(filtered)
 
         if len(all_available) >= max_results:
             break

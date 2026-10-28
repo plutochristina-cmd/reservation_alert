@@ -71,6 +71,12 @@ async function runAllTests() {
       { encoding: 'utf-8' }
     ).trim();
     assert(tzAndVaultCheck === 'OK', "vault 빈 환경변수 폴백 방어 및 scheduler KST(+09:00) ISO 타임스탬프 검증 통과");
+
+    const deadlineFilterCheck = execSync(
+      'python -c "from datetime import datetime; import scheduler; now = datetime(2026, 10, 28, 10, 4, 0); rules = {\'business\': {\'bookingAvailableCode\': \'RI03\', \'bookingAvailableValue\': 1, \'bookingTimeUnitCode\': \'RT01\'}, \'bizItem\': {\'minBookingCount\': 1}}; raw = [{\'unitStartTime\': \'2026-10-28 10:30:00\', \'isBusinessDay\': True, \'isUnitBusinessDay\': True, \'isSaleDay\': True, \'isUnitSaleDay\': True, \'unitStock\': 1, \'unitBookingCount\': 0}, {\'unitStartTime\': \'2026-10-28 11:00:00\', \'isBusinessDay\': True, \'isUnitBusinessDay\': True, \'isSaleDay\': True, \'isUnitSaleDay\': True, \'unitStock\': 1, \'unitBookingCount\': 0}, {\'unitStartTime\': \'2026-10-28 11:30:00\', \'isBusinessDay\': True, \'isUnitBusinessDay\': True, \'isSaleDay\': True, \'isUnitSaleDay\': True, \'unitStock\': 1, \'unitBookingCount\': 0}]; res = scheduler.filter_naver_hourly_slots(raw, now, rules, safety_buffer_minutes=5); assert [r[\'datetime_str\'] for r in res] == [\'2026-10-28 11:30:00\']; now2 = datetime(2026, 10, 28, 10, 56, 0); raw2 = [{\'unitStartTime\': \'2026-10-28 12:00:00\', \'isBusinessDay\': True, \'isUnitBusinessDay\': True, \'isSaleDay\': True, \'isUnitSaleDay\': True, \'unitStock\': 1, \'unitBookingCount\': 0}, {\'unitStartTime\': \'2026-10-28 12:30:00\', \'isBusinessDay\': True, \'isUnitBusinessDay\': True, \'isSaleDay\': True, \'isUnitSaleDay\': True, \'unitStock\': 1, \'unitBookingCount\': 0}]; res2 = scheduler.filter_naver_hourly_slots(raw2, now2, rules, safety_buffer_minutes=5); assert [r[\'datetime_str\'] for r in res2] == [\'2026-10-28 12:30:00\']; print(\'FILTER_OK\')"',
+      { encoding: 'utf-8' }
+    ).trim();
+    assert(deadlineFilterCheck === 'FILTER_OK', "네이버 매장별 마감 규칙(RI03 1시간 전 마감) + 5분 안전 버퍼(10:04 -> 10:30/11:00 제외, 10:56 -> 12:00 제외) 검증 통과");
   } catch (e) {
     assert(false, `파이썬 구문 오류: ${e.message}`);
   }

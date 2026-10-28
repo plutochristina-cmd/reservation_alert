@@ -141,68 +141,18 @@ def fetch_hourly_schedule(start_dt: datetime, end_dt: datetime) -> list:
 
 def find_earliest_available_slots(days_ahead: int = 365, max_results: int = 3) -> list:
     """현재 시점부터 미래 days_ahead 일 동안 예약 가능한 가장 빠른 슬롯을 max_results 개까지 검색합니다."""
+    import scheduler
     now = get_now_kst()
-    chunk_size = 60  # 60일 단위로 분할 조회
-    current_start = now
     end_limit = now + timedelta(days=days_ahead)
-
-    all_available = []
-
-    logger.info(f"📅 예약 슬롯 검색 시작: {now.strftime('%Y-%m-%d %H:%M:%S')} ~ {end_limit.strftime('%Y-%m-%d')} (향후 {days_ahead}일)")
-
-    while current_start < end_limit:
-        current_end = min(current_start + timedelta(days=chunk_size), end_limit)
-        start_str = current_start.strftime("%Y-%m-%d")
-        end_str = current_end.strftime("%Y-%m-%d")
-
-        hourly_slots = fetch_hourly_schedule(current_start, current_end)
-
-        for slot in hourly_slots:
-            slot_time_str = slot.get("unitStartTime")
-            if not slot_time_str:
-                continue
-
-            try:
-                slot_time = datetime.strptime(slot_time_str, "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                continue
-
-            # 과거 시점 슬롯 제외
-            if slot_time <= now:
-                continue
-
-            # 영업일 및 판매일 확인
-            is_open = (
-                slot.get("isBusinessDay", False)
-                and slot.get("isUnitBusinessDay", False)
-                and slot.get("isSaleDay", False)
-                and slot.get("isUnitSaleDay", False)
-            )
-
-            if not is_open:
-                continue
-
-            # 재고 잔여 여부 확인
-            stock = slot.get("unitStock") or 0
-            booked = slot.get("unitBookingCount") or 0
-            remain = stock - booked
-
-            if remain > 0:
-                all_available.append({
-                    "datetime": slot_time,
-                    "datetime_str": slot_time_str,
-                    "remain_stock": remain,
-                    "raw": slot
-                })
-
-        logger.info(f"  - [{start_str} ~ {end_str}] 조회 완료 (현재까지 발견된 빈자리: {len(all_available)}개)")
-
-        # 다음 청크 시작일로 이동
-        current_start = current_end + timedelta(days=1)
-
-    # 시간순 정렬
-    all_available.sort(key=lambda x: x["datetime"])
-    return all_available[:max_results]
+    logger.info(f"📅 예약 슬롯 검색 시작: {now.strftime('%Y-%m-%d %H:%M:%S')} ~ {end_limit.strftime('%Y-%m-%d')} (향후 {days_ahead}일, 마감규칙+5분버퍼 적용)")
+    return scheduler.scan_available_slots(
+        BUSINESS_TYPE_ID,
+        BUSINESS_ID,
+        BIZ_ITEM_ID,
+        start_dt=now,
+        end_dt=end_limit,
+        max_results=max_results
+    )
 
 
 def format_slot_korean(dt: datetime, remain: int) -> str:
