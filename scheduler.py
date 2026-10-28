@@ -751,7 +751,7 @@ def update_reservation_secure(headers: dict, res_id: str, payload: dict) -> None
     requests.patch(update_url, headers=headers, json=payload, timeout=8)
 
 
-def run_supabase_multi_user():
+def run_supabase_multi_user(only_mode: str = None):
     """Supabase에서 모든 활성 예약을 조회하여 개별 사용자 기기로 알림을 발송합니다."""
     logger.info("🌐 [Supabase 연동 모드] 다중 사용자 예약 목록 로드 중...")
 
@@ -782,6 +782,10 @@ def run_supabase_multi_user():
             device_info = res.get("devices") or {}
             push_sub = res.get("push_subscription") or device_info.get("push_subscription")
             now_iso = get_now_kst_iso()
+
+            if only_mode == "waiting":
+                if biz_type != 88 or not parse_catchtable_waiting_spec(item_id).get("is_waiting"):
+                    continue
 
             if biz_type == 99:
                 # 놀티켓 / 인터파크 콘서트 취켓팅 모니터링
@@ -970,6 +974,7 @@ def main():
     parser = argparse.ArgumentParser(description="네이버 예약 다중 사용자 자동 감지 스케줄러")
     parser.add_argument("--daemon", "--loop", action="store_true", help="지정된 주기마다 무한 반복 실행하는 백그라운드 데몬 모드")
     parser.add_argument("--interval", type=int, default=600, help="반복 주기 (초 단위, 기본값: 600초 / 10분)")
+    parser.add_argument("--only", type=str, default=None, help="특정 모드만 스캔 (예: waiting)")
     args = parser.parse_args()
 
     if args.daemon:
@@ -977,7 +982,7 @@ def main():
         while True:
             try:
                 if SUPABASE_URL and SUPABASE_KEY:
-                    run_supabase_multi_user()
+                    run_supabase_multi_user(only_mode=args.only)
                 else:
                     logger.info("⚠️ SUPABASE_URL/KEY가 설정되지 않아 기본 단일 모니터링(monitor.py) 모드로 실행합니다.")
                     import monitor
@@ -996,7 +1001,7 @@ def main():
                 break
     else:
         if SUPABASE_URL and SUPABASE_KEY:
-            run_supabase_multi_user()
+            run_supabase_multi_user(only_mode=args.only)
         else:
             logger.info("⚠️ SUPABASE_URL/KEY가 설정되지 않아 기본 단일 모니터링(monitor.py) 모드로 실행합니다.")
             import monitor

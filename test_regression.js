@@ -283,6 +283,9 @@ async function runAllTests() {
 
     const hasRefreshCycleInApp = appJsContent.includes("1시간 주기");
     assert(hasRefreshCycleInApp, "예약 카드(app.js) 알람 갱신 주기(1시간 주기) 정상 표기 검증");
+
+    const hasWaitingFastCycleInApp = appJsContent.includes("1분 주기 초고속 감시 중") && appJsContent.includes("/api/cron?only=waiting");
+    assert(hasWaitingFastCycleInApp, "원격 웨이팅 전용 1분 주기 초고속 감시(방법 A + 방법 B only=waiting 연동) 검증");
   } catch (err) {
     assert(false, `클라이언트 정적 분석 중 오류: ${err.message}`);
   }

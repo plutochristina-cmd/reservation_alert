@@ -316,15 +316,40 @@ GRANT EXECUTE ON FUNCTION public.scheduler_update_reservation(TEXT, UUID, JSONB,
 
 -- =========================================================================
 -- (6) 클라우드 무인 크론 자동 트리거 (pg_cron + pg_net)
--- 매시 37분(비혼잡 소수 시간대)마다 Vercel 서버리스 크론(/api/cron)을 오차 없이 1회 호출합니다.
+-- 1) 전체 예약(네이버/캐치테이블 예약/놀티켓): 매시 37분(비혼잡 소수 시간대)마다 1시간 주기 호출
+-- 2) 캐치테이블 원격 웨이팅 전용: 매 1분마다 실행하되, 활성 원격 웨이팅이 DB에 존재할 때만 호출 (제로 부하)
 -- =========================================================================
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE EXTENSION IF NOT EXISTS pg_net;
+
+CREATE OR REPLACE FUNCTION public.trigger_waiting_cron_if_active()
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.reservations
+        WHERE is_active = true
+          AND business_type_id = 88
+          AND biz_item_id LIKE 'waiting%'
+    ) THEN
+        PERFORM net.http_get('https://naver-reserve-alert.vercel.app/api/cron?only=waiting');
+    END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.trigger_waiting_cron_if_active() TO anon, authenticated, service_role;
 
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'vercel-reservation-cron-hourly') THEN
         PERFORM cron.unschedule('vercel-reservation-cron-hourly');
+    END IF;
+    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'vercel-waiting-cron-minutely') THEN
+        PERFORM cron.unschedule('vercel-waiting-cron-minutely');
     END IF;
 EXCEPTION WHEN OTHERS THEN
     NULL;
@@ -334,4 +359,10 @@ SELECT cron.schedule(
     'vercel-reservation-cron-hourly',
     '37 * * * *',
     $$SELECT net.http_get('https://naver-reserve-alert.vercel.app/api/cron');$$
+);
+
+SELECT cron.schedule(
+    'vercel-waiting-cron-minutely',
+    '* * * * *',
+    $$SELECT public.trigger_waiting_cron_if_active();$$
 );

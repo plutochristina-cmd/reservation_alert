@@ -670,7 +670,7 @@ def update_reservation_secure(headers: dict, res_id: str, payload: dict):
     requests.patch(update_url, headers=headers, json=payload, timeout=8)
 
 
-def execute_multi_user_scan(force_notify: bool = False) -> dict:
+def execute_multi_user_scan(force_notify: bool = False, only_mode: str = None) -> dict:
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -695,6 +695,10 @@ def execute_multi_user_scan(force_notify: bool = False) -> dict:
         push_sub = res.get("push_subscription") or device_info.get("push_subscription")
         now_iso = get_now_kst_iso()
         pushed = False
+
+        if only_mode == "waiting":
+            if biz_type != 88 or not parse_catchtable_waiting_spec(item_id).get("is_waiting"):
+                continue
 
         if biz_type == 99:
             top_seats = scan_nol_ticket_seats(biz_id, item_id)
@@ -829,9 +833,10 @@ class handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(parsed.query)
         force = qs.get('force', ['false'])[0].lower() in ['1', 'true', 'yes']
+        only_mode = (qs.get('only', [None])[0] or qs.get('mode', [None])[0] or '').strip().lower() or None
 
         try:
-            result = execute_multi_user_scan(force_notify=force)
+            result = execute_multi_user_scan(force_notify=force, only_mode=only_mode)
             status = 200 if result.get("ok") else 500
         except Exception as e:
             result = {"ok": False, "error": str(e)}

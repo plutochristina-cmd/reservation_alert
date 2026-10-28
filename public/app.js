@@ -681,7 +681,7 @@ function renderReservationCard(res) {
     <div class="slot-badge-box">
       <div class="slot-label-row">
         <span class="slot-label">${isCtWaiting ? "실시간 원격 웨이팅 & 대기 팀 현황" : (isCatchTable ? "캐치테이블 실시간 예약 가능 일자" : (isNol ? "실시간 취소표 잔여석 현황" : "가장 빠른 예약 가능 일시"))}</span>
-        <span class="cycle-pill">⏱️ 1시간 주기 자동 감시 중${lastCheckedDesc}</span>
+        <span class="cycle-pill">${isCtWaiting ? "⚡ 1분 주기 초고속 감시 중" : "⏱️ 1시간 주기 자동 감시 중"}${lastCheckedDesc}</span>
       </div>
       <div class="slot-value${isNoneState ? " none" : ""}" id="slot-text-${res.id}">
         ${isNoneState ? "❌" : "✨"} ${lastSlotText}
@@ -866,16 +866,25 @@ async function renderReservationsList(skipAutoCron = false) {
       container.appendChild(renderReservationCard(res));
     });
 
-    // 활성 예약 중 마지막 확인 시각(updated_at)이 35분 이상 경과했으면 백그라운드로 Vercel /api/cron 자동 호출 후 갱신
+    // 활성 예약 중 마지막 확인 시각(updated_at)이 35분 이상(원격 웨이팅은 1분 이상) 경과했으면 백그라운드로 Vercel /api/cron 자동 호출 후 갱신
     if (!skipAutoCron && typeof fetch === "function") {
       const nowMs = Date.now();
-      const needsCronSync = list.some(r => {
+      const needsFullCron = list.some(r => {
         if (!r.is_active) return false;
         if (!r.updated_at) return true;
         const diffMin = (nowMs - new Date(r.updated_at).getTime()) / 60000;
         return diffMin >= 35;
       });
-      if (needsCronSync) {
+      const needsWaitingCron = list.some(r => {
+        if (!r.is_active) return false;
+        const isWait = (r.business_type_id === 88) && String(r.biz_item_id || "").startsWith("waiting");
+        if (!isWait) return false;
+        if (!r.updated_at) return true;
+        const diffMin = (nowMs - new Date(r.updated_at).getTime()) / 60000;
+        return diffMin >= 1;
+      });
+
+      if (needsFullCron) {
         fetch(`${API_BASE_URL}/api/cron`)
           .then(r => r.ok ? r.json() : null)
           .then(data => {
@@ -884,7 +893,39 @@ async function renderReservationsList(skipAutoCron = false) {
             }
           })
           .catch(() => {});
+      } else if (needsWaitingCron) {
+        fetch(`${API_BASE_URL}/api/cron?only=waiting`)
+          .then(r => r.ok ? r.json() : null)
+          .then(data => {
+            if (data && data.ok) {
+              renderReservationsList(true);
+            }
+          })
+          .catch(() => {});
       }
+    }
+  }
+
+  // [방법 A] 웹 앱이 켜져 있는 동안 활성 원격 웨이팅 항목이 있으면 1분(60초)마다 자동 스캔
+  if (typeof window !== "undefined") {
+    if (window.ctWaitingAutoTimer) {
+      clearInterval(window.ctWaitingAutoTimer);
+      window.ctWaitingAutoTimer = null;
+    }
+    const hasActiveWaiting = list.some(
+      r => r.is_active && r.business_type_id === 88 && String(r.biz_item_id || "").startsWith("waiting")
+    );
+    if (hasActiveWaiting && typeof setInterval === "function" && typeof fetch === "function") {
+      window.ctWaitingAutoTimer = setInterval(() => {
+        fetch(`${API_BASE_URL}/api/cron?only=waiting`)
+          .then(r => r.ok ? r.json() : null)
+          .then(data => {
+            if (data && data.ok) {
+              renderReservationsList(true);
+            }
+          })
+          .catch(() => {});
+      }, 60000);
     }
   }
 }
