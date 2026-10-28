@@ -229,12 +229,14 @@ async function fetchPreviewInfo(parsed) {
       if (resp.ok) {
         const data = await resp.json();
         let slotDates = [];
+        let waitingInfo = null;
         const shopRef = data.shopRef || parsed.shopRef;
         if (shopRef) {
           const sResp = await fetch(`${API_BASE_URL}/api/catchtable?shopRef=${encodeURIComponent(shopRef)}&action=slots`);
           if (sResp.ok) {
             const sData = await sResp.json();
             slotDates = sData.availableDates || [];
+            waitingInfo = sData.waiting || null;
           }
         }
         return {
@@ -243,7 +245,9 @@ async function fetchPreviewInfo(parsed) {
           address: data.address || "",
           category: data.category || "식당",
           shopRef: shopRef,
-          availableDates: slotDates
+          shopUrl: data.shopUrl || parsed.shopRef,
+          availableDates: slotDates,
+          waiting: waitingInfo
         };
       }
     } catch (e) {
@@ -255,7 +259,9 @@ async function fetchPreviewInfo(parsed) {
       address: "",
       category: "식당",
       shopRef: parsed.shopRef,
-      availableDates: []
+      shopUrl: parsed.shopRef,
+      availableDates: [],
+      waiting: null
     };
   }
 
@@ -550,6 +556,7 @@ function renderReservationCard(res) {
 
   const isNol = (res.business_type_id === 99);
   const isCatchTable = (res.business_type_id === 88);
+  const isCtWaiting = isCatchTable && String(res.biz_item_id || "").startsWith("waiting");
 
   let lastSlotText = "";
   let isNoneState = false;
@@ -566,20 +573,26 @@ function renderReservationCard(res) {
     }
   } else if (res.updated_at) {
     isNoneState = true;
-    lastSlotText = isCatchTable
-      ? "현재 예약 가능한 일정 없음 (실시간 감시 중)"
-      : (isNol ? "현재 전석 매진 (취소표 실시간 감시 중)" : "지정 기간 내 빈자리 없음 (자동 감시 중)");
+    lastSlotText = isCtWaiting
+      ? "현재 원격 웨이팅 조건 미달성 또는 오픈 전 (실시간 감시 중)"
+      : (isCatchTable
+        ? "현재 예약 가능한 일정 없음 (실시간 감시 중)"
+        : (isNol ? "현재 전석 매진 (취소표 실시간 감시 중)" : "지정 기간 내 빈자리 없음 (자동 감시 중)"));
   } else {
-    lastSlotText = isCatchTable
-      ? "캐치테이블 빈자리 감시 대기 중"
-      : (isNol ? "실시간 취켓팅 감시 대기 중" : "아직 확인 전 (스케줄러 대기 중)");
+    lastSlotText = isCtWaiting
+      ? "캐치테이블 원격 웨이팅 감시 대기 중"
+      : (isCatchTable
+        ? "캐치테이블 빈자리 감시 대기 중"
+        : (isNol ? "실시간 취켓팅 감시 대기 중" : "아직 확인 전 (스케줄러 대기 중)"));
   }
 
   // URL에서 startDate, endDate 추출
   let periodBadgeHtml = "";
   let sDate = null;
   let eDate = null;
-  if (isCatchTable) {
+  if (isCtWaiting) {
+    periodBadgeHtml = `<div class="card-period-badge" style="color: #fb923c; border-color: rgba(251, 146, 60, 0.35);">🏃 원격 웨이팅 오픈 · 대기 팀 수 실시간 감시 중</div>`;
+  } else if (isCatchTable) {
     periodBadgeHtml = `<div class="card-period-badge" style="color: #ff7a59; border-color: rgba(255, 82, 56, 0.3);">🍽️ 실시간 빈자리 예약 감시 중</div>`;
   } else if (isNol) {
     periodBadgeHtml = `<div class="card-period-badge" style="color: #a78bfa; border-color: rgba(167, 139, 250, 0.3);">🎫 취소표 실시간 고속 감시 중</div>`;
@@ -607,7 +620,9 @@ function renderReservationCard(res) {
   }
 
   let platformBadge = `<span class="biz-badge" style="margin-bottom: 4px; display: inline-block;">네이버 예약</span>`;
-  if (isCatchTable) {
+  if (isCtWaiting) {
+    platformBadge = `<span class="biz-badge" style="background: linear-gradient(135deg, #f97316, #ea580c); margin-bottom: 4px; display: inline-block;">🏃 캐치테이블 원격 웨이팅</span>`;
+  } else if (isCatchTable) {
     platformBadge = `<span class="biz-badge" style="background: linear-gradient(135deg, #ff5238, #ff7a59); margin-bottom: 4px; display: inline-block;">🍽️ 캐치테이블</span>`;
   } else if (isNol) {
     platformBadge = `<span class="biz-badge" style="background: linear-gradient(135deg, #8b5cf6, #6366f1); margin-bottom: 4px; display: inline-block;">🎫 놀티켓·인터파크 취켓팅</span>`;
@@ -635,7 +650,10 @@ function renderReservationCard(res) {
 
   let openLinkText = "네이버 예약 열기";
   let openLinkStyle = "";
-  if (isCatchTable) {
+  if (isCtWaiting) {
+    openLinkText = "캐치테이블 웨이팅 열기";
+    openLinkStyle = "border-color: rgba(249, 115, 22, 0.45); color: #fb923c;";
+  } else if (isCatchTable) {
     openLinkText = "캐치테이블 예약 열기";
     openLinkStyle = "border-color: rgba(255, 82, 56, 0.4); color: #ff7a59;";
   } else if (isNol) {
@@ -662,7 +680,7 @@ function renderReservationCard(res) {
     
     <div class="slot-badge-box">
       <div class="slot-label-row">
-        <span class="slot-label">${isCatchTable ? "캐치테이블 실시간 예약 가능 일자" : (isNol ? "실시간 취소표 잔여석 현황" : "가장 빠른 예약 가능 일시")}</span>
+        <span class="slot-label">${isCtWaiting ? "실시간 원격 웨이팅 & 대기 팀 현황" : (isCatchTable ? "캐치테이블 실시간 예약 가능 일자" : (isNol ? "실시간 취소표 잔여석 현황" : "가장 빠른 예약 가능 일시"))}</span>
         <span class="cycle-pill">⏱️ 1시간 주기 자동 감시 중${lastCheckedDesc}</span>
       </div>
       <div class="slot-value${isNoneState ? " none" : ""}" id="slot-text-${res.id}">
@@ -701,6 +719,46 @@ function renderReservationCard(res) {
     btn.disabled = true;
     btn.textContent = "조회 중...";
     showToast(`⏳ '${res.biz_name}' 실시간 스캔 중...`);
+
+    if (isCtWaiting) {
+      // 캐치테이블 원격 웨이팅 실시간 조회
+      try {
+        const resp = await fetch(`${API_BASE_URL}/api/catchtable?shopRef=${encodeURIComponent(res.business_id)}&action=waiting`);
+        const data = await resp.json();
+        const w = data.waiting || {};
+        const slotBox = card.querySelector(`#slot-text-${res.id}`);
+        const rawSpec = String(res.biz_item_id || "waiting:hall:2").split(":");
+        const scope = (rawSpec[1] === "total" || rawSpec[1] === "takeout") ? rawSpec[1] : "hall";
+        const minTeams = rawSpec.length >= 3 ? (parseInt(rawSpec[2], 10) || 0) : 2;
+        const targetTeams = scope === "hall" ? (w.hallTeamCount || 0) : (scope === "takeout" ? (w.takeoutTeamCount || 0) : (w.totalTeamCount || 0));
+        const scopeLabel = scope === "hall" ? "홀" : (scope === "takeout" ? "포장" : "전체");
+        const effectiveMin = Math.max(minTeams, w.possibleWaitingAtLeastCount || 0);
+
+        if (w.isSupported && w.isRemoteOpen && targetTeams >= effectiveMin) {
+          const msg = `🏃 원격 웨이팅 가능! (현재 ${scopeLabel} ${targetTeams}팀 대기 · ${effectiveMin > 0 ? effectiveMin + "팀 이상 조건 달성" : "즉시 등록 가능"})`;
+          slotBox.textContent = msg;
+          slotBox.classList.remove("none");
+          showToast(`🎉 [${res.biz_name}] 지금 원격 웨이팅 신청이 가능합니다! (${scopeLabel} ${targetTeams}팀)`);
+        } else if (w.isSupported) {
+          const statusDesc = w.isRemoteOpen
+            ? `현재 ${scopeLabel} ${targetTeams}팀 대기 중 (${effectiveMin}팀 이상 시 알림)`
+            : `${w.statusText || "원격 웨이팅 비활성"} (현재 ${scopeLabel} ${targetTeams}팀 대기)`;
+          slotBox.textContent = `❌ ${statusDesc}`;
+          slotBox.classList.add("none");
+          showToast(`ℹ️ ${statusDesc}`);
+        } else {
+          slotBox.textContent = `❌ 웨이팅 정보를 불러올 수 없습니다.`;
+          slotBox.classList.add("none");
+          showToast(`ℹ️ 현재 웨이팅 운영 정보가 확인되지 않습니다.`);
+        }
+      } catch (err) {
+        showToast("❌ 조회 실패: " + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "지금 확인";
+      }
+      return;
+    }
 
     if (isCatchTable) {
       // 캐치테이블 실시간 조회
@@ -1164,20 +1222,41 @@ document.addEventListener("DOMContentLoaded", async () => {
       const resp = await fetch(`${API_BASE_URL}/api/catchtable?shopRef=${encodeURIComponent(shopRef)}&action=slots`);
       const data = await resp.json();
       const avail = data.availableDates || [];
+      const waiting = data.waiting || {};
+      const resolvedRef = data.shopRef || shopRef;
+
+      const isWaitingPrimary = Boolean(waiting.isSupported && avail.length === 0);
+      const defaultSelectedSpec = isWaitingPrimary ? "waiting:hall:2" : "all";
+      const defaultItemName = isWaitingPrimary
+        ? "[원격 웨이팅] 홀 2팀 이상 대기 시 오픈 알림"
+        : "전체 예약 일정 (빈자리 감시)";
 
       selectedCtTarget = {
         platform: "catchtable",
-        shopRef: shopRef,
+        shopRef: resolvedRef,
         shopName: shop.shopName,
-        shopUrl: shop.shopUrl || shopRef,
+        shopUrl: shop.shopUrl || resolvedRef,
         address: shop.address || "",
         category: shop.category || "식당",
-        availableDates: avail
+        availableDates: avail,
+        waiting: waiting,
+        selectedDate: defaultSelectedSpec,
+        selectedItemName: defaultItemName
       };
 
-      const availBadge = avail.length > 0 
-        ? `<span style="color: #4ade80; font-weight: 700;">${avail.length}개 날짜 예약 가능!</span>`
-        : `<span style="color: #ff7a59; font-weight: 700;">전 일정 마감 (빈자리 감시 대기)</span>`;
+      let statusBadgesHtml = "";
+      if (waiting.isSupported) {
+        const wColor = waiting.isRemoteOpen ? "#4ade80" : "#fb923c";
+        const wState = waiting.isRemoteOpen
+          ? `🏃 원격 웨이팅 가능 (홀 ${waiting.hallTeamCount || 0}팀 · 전체 ${waiting.totalTeamCount || 0}팀)`
+          : `🏃 ${waiting.statusText || '원격 웨이팅 대기'} (홀 ${waiting.hallTeamCount || 0}팀)`;
+        statusBadgesHtml += `<span style="color: ${wColor}; font-weight: 700; font-size: 0.78rem; display: block;">${wState}</span>`;
+      }
+      if (avail.length > 0) {
+        statusBadgesHtml += `<span style="color: #4ade80; font-weight: 700; font-size: 0.78rem; display: block;">🍽️ ${avail.length}개 날짜 예약 가능!</span>`;
+      } else if (!waiting.isSupported) {
+        statusBadgesHtml += `<span style="color: #ff7a59; font-weight: 700; font-size: 0.78rem; display: block;">전 일정 마감 (빈자리 감시 대기)</span>`;
+      }
 
       if (ctPreviewCard) {
         ctPreviewCard.innerHTML = `
@@ -1186,22 +1265,77 @@ document.addEventListener("DOMContentLoaded", async () => {
               <span class="biz-badge" style="background: linear-gradient(135deg, #ff5238, #ff7a59);">캐치테이블</span>
               <strong style="color: #fff; font-size: 0.9rem;">${shop.shopName}</strong>
             </div>
-            <div style="color: var(--text-muted); font-size: 0.74rem;">📍 ${shop.address || '위치 확인 중'} | 🍽️ 실시간 빈자리 푸시 모니터링</div>
+            <div style="color: var(--text-muted); font-size: 0.74rem;">📍 ${shop.address || '위치 확인 중'} | 실시간 예약 · 원격 웨이팅 통합 감시</div>
           </div>
-          ${availBadge}
+          <div style="text-align: right;">${statusBadgesHtml}</div>
         `;
+      }
+
+      const ctItemsLabel = document.getElementById("ct-items-label");
+      if (ctItemsLabel) {
+        ctItemsLabel.textContent = "🎯 감시 모드 선택 (원격 웨이팅 / 예약 빈자리):";
       }
 
       if (ctItemsChips) {
         ctItemsChips.innerHTML = "";
+
+        const selectCtChip = (chipEl, specVal, labelText) => {
+          document.querySelectorAll("#ct-items-chips .item-chip").forEach(c => c.classList.remove("selected"));
+          chipEl.classList.add("selected");
+          selectedCtTarget.selectedDate = specVal;
+          selectedCtTarget.selectedItemName = labelText;
+          if (btnSubmitCt) {
+            btnSubmitCt.innerHTML = specVal.startsWith("waiting")
+              ? `<span>+ 캐치테이블 원격 웨이팅 알림 추가</span>`
+              : `<span>+ 캐치테이블 빈자리 모니터링 추가</span>`;
+          }
+        };
+
+        // 1) 원격 웨이팅 감시 옵션들 (홀 2팀 이상 / 홀 1팀·즉시 오픈 / 전체 2팀 이상)
+        const waitOptions = [
+          {
+            spec: "waiting:hall:2",
+            title: "🏃 원격 웨이팅 오픈 (홀 2팀 이상 · 추천)",
+            desc: waiting.isSupported
+              ? `홀 2팀 이상 대기 + 원격 웨이팅 활성화 시 즉시 알림 (현재 홀 ${waiting.hallTeamCount || 0}팀)`
+              : "매장 내(홀) 2팀 이상 웨이팅이 걸려 원격 웨이팅이 열리는 시점 알림"
+          },
+          {
+            spec: "waiting:hall:1",
+            title: "🏃 원격 웨이팅 즉시 오픈 (홀 1팀/오픈 즉시)",
+            desc: "원격 웨이팅 등록 버튼이 활성화되는 즉시 푸시 알림"
+          },
+          {
+            spec: "waiting:total:2",
+            title: "🏃 전체(홀+포장) 2팀 이상 원격 웨이팅",
+            desc: `전체 대기 2팀 이상 + 원격 웨이팅 가능 시 알림`
+          }
+        ];
+
+        waitOptions.forEach(opt => {
+          const wChip = document.createElement("button");
+          wChip.type = "button";
+          const isDefault = (selectedCtTarget.selectedDate === opt.spec);
+          wChip.className = "item-chip" + (isDefault ? " selected" : "");
+          wChip.innerHTML = `<strong>${opt.title}</strong><span style="font-size: 0.7rem; opacity: 0.85; display: block; margin-top: 2px;">${opt.desc}</span>`;
+          wChip.addEventListener("click", () => {
+            const cleanLabel = opt.spec === "waiting:hall:2"
+              ? "[원격 웨이팅] 홀 2팀 이상 대기 시 오픈 알림"
+              : (opt.spec === "waiting:hall:1"
+                ? "[원격 웨이팅] 오픈 즉시 알림 (홀 1팀 이상)"
+                : "[원격 웨이팅] 전체 2팀 이상 대기 시 오픈 알림");
+            selectCtChip(wChip, opt.spec, cleanLabel);
+          });
+          ctItemsChips.appendChild(wChip);
+        });
+
+        // 2) 예약 빈자리 감시 옵션
         const allChip = document.createElement("button");
         allChip.type = "button";
-        allChip.className = "item-chip selected";
-        allChip.innerHTML = `<strong>✨ 전체 빈자리 감시 (추천)</strong><span style="font-size: 0.7rem; opacity: 0.8; display: block; margin-top: 2px;">어느 날짜든 빈자리 오픈 시 즉시 푸시 알림</span>`;
+        allChip.className = "item-chip" + (selectedCtTarget.selectedDate === "all" ? " selected" : "");
+        allChip.innerHTML = `<strong>🍽️ 전체 예약 빈자리 감시</strong><span style="font-size: 0.7rem; opacity: 0.8; display: block; margin-top: 2px;">어느 날짜든 예약 빈자리 오픈 시 즉시 푸시 알림</span>`;
         allChip.addEventListener("click", () => {
-          document.querySelectorAll("#ct-items-chips .item-chip").forEach(c => c.classList.remove("selected"));
-          allChip.classList.add("selected");
-          selectedCtTarget.selectedDate = "all";
+          selectCtChip(allChip, "all", "전체 예약 일정 (빈자리 감시)");
         });
         ctItemsChips.appendChild(allChip);
 
@@ -1211,17 +1345,20 @@ document.addEventListener("DOMContentLoaded", async () => {
           chip.className = "item-chip";
           const pCounts = item.availablePersonCounts || [];
           const pText = pCounts.length ? `${Math.min(...pCounts)}~${Math.max(...pCounts)}명 가능` : '예약 가능';
-          chip.innerHTML = `<strong>${item.date}</strong><span style="font-size: 0.7rem; opacity: 0.8; display: block; margin-top: 2px;">${pText}</span>`;
+          chip.innerHTML = `<strong>📅 ${item.date} 예약</strong><span style="font-size: 0.7rem; opacity: 0.8; display: block; margin-top: 2px;">${pText}</span>`;
           chip.addEventListener("click", () => {
-            document.querySelectorAll("#ct-items-chips .item-chip").forEach(c => c.classList.remove("selected"));
-            chip.classList.add("selected");
-            selectedCtTarget.selectedDate = item.date;
+            selectCtChip(chip, item.date, `${item.date} 예약`);
           });
           ctItemsChips.appendChild(chip);
         });
       }
 
-      if (btnSubmitCt) btnSubmitCt.disabled = false;
+      if (btnSubmitCt) {
+        btnSubmitCt.disabled = false;
+        btnSubmitCt.innerHTML = selectedCtTarget.selectedDate.startsWith("waiting")
+          ? `<span>+ 캐치테이블 원격 웨이팅 알림 추가</span>`
+          : `<span>+ 캐치테이블 빈자리 모니터링 추가</span>`;
+      }
     } catch (err) {
       if (ctPreviewCard) {
         ctPreviewCard.innerHTML = `<span style="color: #ef4444;">❌ 조회 실패: ${err.message}</span>`;
@@ -1231,7 +1368,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  // 캐치테이블 예약 추가 버튼
+  // 캐치테이블 예약/웨이팅 추가 버튼
   if (btnSubmitCt) {
     btnSubmitCt.addEventListener("click", async () => {
       if (!selectedCtTarget) return;
@@ -1241,15 +1378,22 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       const shopUrl = selectedCtTarget.shopUrl || selectedCtTarget.shopRef;
       const finalUrl = `https://app.catchtable.co.kr/ct/shop/${shopUrl}`;
+      const spec = selectedCtTarget.selectedDate || "all";
+      const isWaitMode = String(spec).startsWith("waiting");
+      const itemName = selectedCtTarget.selectedItemName || (
+        isWaitMode
+          ? "[원격 웨이팅] 홀 2팀 이상 대기 시 오픈 알림"
+          : (spec !== "all" ? `${spec} 예약` : "전체 예약 일정 (빈자리 감시)")
+      );
 
       const newRes = {
         id: "res_" + Date.now(),
         naver_url: finalUrl,
         business_type_id: 88,
         business_id: selectedCtTarget.shopRef,
-        biz_item_id: selectedCtTarget.selectedDate || "all",
+        biz_item_id: spec,
         biz_name: selectedCtTarget.shopName,
-        item_name: selectedCtTarget.selectedDate && selectedCtTarget.selectedDate !== 'all' ? `${selectedCtTarget.selectedDate} 예약` : "전체 예약 일정 (빈자리 감시)",
+        item_name: itemName,
         is_active: true,
         last_slots: []
       };
@@ -1262,10 +1406,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (ctItemPickerCard) ctItemPickerCard.style.display = "none";
       selectedCtTarget = null;
       btnSubmitCt.disabled = false;
-      btnSubmitCt.innerHTML = `<span>+ 캐치테이블 빈자리 모니터링 추가</span>`;
+      btnSubmitCt.innerHTML = `<span>+ 캐치테이블 모니터링 추가</span>`;
 
       await renderReservationsList();
-      showToast(`🎉 [${newRes.biz_name}] 빈자리 모니터링이 추가되었습니다!`);
+      showToast(isWaitMode
+        ? `🏃 [${newRes.biz_name}] 원격 웨이팅 알림이 추가되었습니다!`
+        : `🎉 [${newRes.biz_name}] 빈자리 모니터링이 추가되었습니다!`);
     });
   }
 
@@ -1868,14 +2014,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     parsedCurrentTarget.bizName = info.bizName;
 
     if (parsed.platform === "catchtable") {
-      parsedCurrentTarget.itemName = "전체 예약 일정 (빈자리 감시)";
-      parsedCurrentTarget.bizItemId = "all";
+      const avail = info.availableDates || [];
+      const waiting = info.waiting || {};
+      const isWaitingPrimary = Boolean(waiting.isSupported && avail.length === 0);
+
+      parsedCurrentTarget.bizItemId = isWaitingPrimary ? "waiting:hall:2" : "all";
+      parsedCurrentTarget.itemName = isWaitingPrimary
+        ? "[원격 웨이팅] 홀 2팀 이상 대기 시 오픈 알림"
+        : "전체 예약 일정 (빈자리 감시)";
       parsedCurrentTarget.businessId = info.shopRef || parsed.businessId;
 
-      const avail = info.availableDates || [];
-      const availText = avail.length > 0 
-        ? `<span style="color: #4ade80; font-weight: 700;">${avail.length}개 날짜 예약 가능!</span>`
-        : `<span style="color: #ff7a59; font-weight: 700;">전 일정 마감 (빈자리 대기)</span>`;
+      const availText = waiting.isSupported
+        ? (waiting.isRemoteOpen
+          ? `<span style="color: #4ade80; font-weight: 700;">🏃 원격 웨이팅 가능 (홀 ${waiting.hallTeamCount || 0}팀)</span>`
+          : `<span style="color: #fb923c; font-weight: 700;">🏃 ${waiting.statusText || '원격 웨이팅 대기'} (홀 ${waiting.hallTeamCount || 0}팀)</span>`)
+        : (avail.length > 0
+          ? `<span style="color: #4ade80; font-weight: 700;">${avail.length}개 날짜 예약 가능!</span>`
+          : `<span style="color: #ff7a59; font-weight: 700;">전 일정 마감 (빈자리 대기)</span>`);
 
       previewBox.innerHTML = `
         <div style="display: flex; flex-direction: column; gap: 4px;">
@@ -1883,19 +2038,39 @@ document.addEventListener("DOMContentLoaded", async () => {
             <span class="biz-badge" style="background: linear-gradient(135deg, #ff5238, #ff7a59);">캐치테이블</span>
             <strong>${info.bizName}</strong>
           </div>
-          <div style="color: var(--text-muted); font-size: 0.75rem;">📍 ${info.address || '위치 확인 중'} | 실시간 빈자리 알림 모드</div>
+          <div style="color: var(--text-muted); font-size: 0.75rem;">📍 ${info.address || '위치 확인 중'} | 실시간 예약 · 원격 웨이팅 통합 감시</div>
         </div>
         ${availText}
       `;
 
       if (urlItemPickerCard && urlItemsChips) {
-        urlItemsLabel.textContent = "🍽️ 예약 가능 날짜 현황:";
+        urlItemsLabel.textContent = "🎯 감시 모드 선택 (원격 웨이팅 / 예약 빈자리):";
         urlItemsChips.innerHTML = "";
+
+        const waitChips = [
+          { spec: "waiting:hall:2", text: "🏃 원격 웨이팅 (홀 2팀 이상 · 추천)", itemName: "[원격 웨이팅] 홀 2팀 이상 대기 시 오픈 알림" },
+          { spec: "waiting:hall:1", text: "🏃 원격 웨이팅 (오픈 즉시 / 홀 1팀+)", itemName: "[원격 웨이팅] 오픈 즉시 알림 (홀 1팀 이상)" },
+          { spec: "waiting:total:2", text: "🏃 원격 웨이팅 (전체 2팀 이상)", itemName: "[원격 웨이팅] 전체 2팀 이상 대기 시 오픈 알림" }
+        ];
+
+        waitChips.forEach(wc => {
+          const wChip = document.createElement("button");
+          wChip.type = "button";
+          wChip.className = "item-chip" + (parsedCurrentTarget.bizItemId === wc.spec ? " selected" : "");
+          wChip.textContent = wc.text;
+          wChip.addEventListener("click", () => {
+            document.querySelectorAll("#url-items-chips .item-chip").forEach(c => c.classList.remove("selected"));
+            wChip.classList.add("selected");
+            parsedCurrentTarget.bizItemId = wc.spec;
+            parsedCurrentTarget.itemName = wc.itemName;
+          });
+          urlItemsChips.appendChild(wChip);
+        });
 
         const allChip = document.createElement("button");
         allChip.type = "button";
-        allChip.className = "item-chip selected";
-        allChip.textContent = "✨ 전체 빈자리 감시 (추천)";
+        allChip.className = "item-chip" + (parsedCurrentTarget.bizItemId === "all" ? " selected" : "");
+        allChip.textContent = "🍽️ 전체 예약 빈자리 감시";
         allChip.addEventListener("click", () => {
           document.querySelectorAll("#url-items-chips .item-chip").forEach(c => c.classList.remove("selected"));
           allChip.classList.add("selected");
@@ -1909,7 +2084,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           chip.type = "button";
           chip.className = "item-chip";
           const pCounts = d.availablePersonCounts || [];
-          chip.textContent = `${d.date} (${pCounts.join(",")}명)`;
+          chip.textContent = `📅 ${d.date} (${pCounts.join(",")}명)`;
           chip.addEventListener("click", () => {
             document.querySelectorAll("#url-items-chips .item-chip").forEach(c => c.classList.remove("selected"));
             chip.classList.add("selected");

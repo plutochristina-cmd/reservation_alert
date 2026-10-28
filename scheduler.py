@@ -490,7 +490,151 @@ def get_catchtable_shop_ref(shop_ref_or_alias: str) -> str:
     return clean_alias
 
 
-def scan_catchtable_slots(shop_ref: str, max_results: int = 5) -> list:
+def parse_catchtable_waiting_spec(biz_item_id: str) -> dict:
+    """biz_item_id('waiting:hall:2' 등)에서 원격 웨이팅 감시 조건을 파싱합니다."""
+    raw = str(biz_item_id or "").strip().lower()
+    if not raw.startswith("waiting"):
+        return {"is_waiting": False}
+    parts = raw.split(":")
+    scope = "hall"
+    min_teams = 2
+    if len(parts) >= 2 and parts[1] in ("hall", "total", "takeout"):
+        scope = parts[1]
+    if len(parts) >= 3:
+        try:
+            min_teams = max(0, int(parts[2]))
+        except ValueError:
+            min_teams = 2
+    elif len(parts) == 2 and parts[1].isdigit():
+        min_teams = max(0, int(parts[1]))
+    return {"is_waiting": True, "scope": scope, "min_teams": min_teams}
+
+
+def evaluate_catchtable_waiting_data(data: dict, scope: str = "hall", min_teams: int = 2) -> dict:
+    """캐치테이블 waiting-shops API 응답 데이터를 기반으로 원격 웨이팅 가능 여부 및 최소 대기 팀 수 조건을 판별합니다."""
+    if not data or not isinstance(data, dict):
+        return {"is_open": False, "korean_text": "웨이팅 미지원 매장", "state_key": ""}
+
+    table_status = data.get("tableStatus") or {}
+    op_info = table_status.get("operationInfo") or {}
+    current_tables = table_status.get("tableCurrentStatus") or []
+
+    is_waiting_avail = bool(op_info.get("isWaitingAvailable"))
+    disabled_reason = op_info.get("waitingDisabledReason")
+    total_teams = int(table_status.get("totalTeamCount") or 0)
+    at_least_cnt = int(
+        op_info.get("possibleWaitingAtLeastCount")
+        or op_info.get("possibleRemoteWaitingAtLeastCount")
+        or 0
+    )
+
+    hall_teams = 0
+    takeout_teams = 0
+    hall_open = False
+    takeout_open = False
+
+    for t in current_tables:
+        t_cnt = int(t.get("teamCount") or 0)
+        is_takeout = bool(t.get("isTakeOut"))
+        is_t_open = (t.get("tableOperationStatus") == "OPEN")
+        if is_takeout:
+            takeout_teams += t_cnt
+            if is_t_open:
+                takeout_open = True
+        else:
+            hall_teams += t_cnt
+            if is_t_open:
+                hall_open = True
+
+    if not current_tables:
+        hall_teams = total_teams
+        hall_open = is_waiting_avail
+
+    target_teams = hall_teams if scope == "hall" else (takeout_teams if scope == "takeout" else total_teams)
+    scope_label = "홀" if scope == "hall" else ("포장" if scope == "takeout" else "전체")
+    effective_min = max(min_teams, at_least_cnt)
+
+    is_remote_ready = (
+        is_waiting_avail
+        and (disabled_reason is None)
+        and (hall_open if scope == "hall" else (takeout_open if scope == "takeout" else True))
+        and (target_teams >= effective_min)
+    )
+
+    if is_remote_ready:
+        cond_desc = f"{effective_min}팀 이상 조건 달성" if effective_min > 0 else "즉시 등록 가능"
+        kor_text = f"원격 웨이팅 가능! (현재 {scope_label} {target_teams}팀 대기 · {cond_desc})"
+        state_key = f"OPEN:{scope}:{effective_min}"
+        return {
+            "is_open": True,
+            "scope": scope,
+            "scope_label": scope_label,
+            "target_teams": target_teams,
+            "total_teams": total_teams,
+            "hall_teams": hall_teams,
+            "takeout_teams": takeout_teams,
+            "effective_min": effective_min,
+            "korean_text": kor_text,
+            "state_key": state_key
+        }
+
+    reason_map = {
+        "UNDER_AVAILABLE_TEAMS": f"대기 팀 부족 (현재 {scope_label} {target_teams}팀 / 최소 {max(effective_min, 2)}팀 필요)",
+        "NON_OPERATING_HOURS": "영업시간 외 (웨이팅 오픈 전/마감)",
+        "CLOSED_DAY": "오늘 휴무일",
+        "CLOSED_MANUALLY": "매장 웨이팅 마감",
+        "PAUSED": "웨이팅 일시 중지",
+        "AUTO_PAUSED_TIME": "브레이크 타임 (일시 중지)",
+        "BY_PASS": f"대기 없음 (현재 {scope_label} {target_teams}팀 · 바로 입장 상태)",
+        "OFFLINE_ONLY": "현장 웨이팅만 가능",
+        "ONLY_OFFLINE_OPERATION_HOURS": "현재 현장 웨이팅만 가능 시간대",
+        "NOT_OPEN_WAITING_OPERATION": "현장 웨이팅만 가능"
+    }
+    if disabled_reason is None and target_teams < effective_min:
+        reason_text = f"현재 {scope_label} {target_teams}팀 대기 ({effective_min}팀 이상 시 알림)"
+    else:
+        reason_text = reason_map.get(disabled_reason, f"원격 웨이팅 대기 중 (현재 {scope_label} {target_teams}팀)")
+
+    return {
+        "is_open": False,
+        "scope": scope,
+        "scope_label": scope_label,
+        "target_teams": target_teams,
+        "total_teams": total_teams,
+        "hall_teams": hall_teams,
+        "takeout_teams": takeout_teams,
+        "effective_min": effective_min,
+        "disabled_reason": disabled_reason,
+        "korean_text": reason_text,
+        "state_key": ""
+    }
+
+
+def scan_catchtable_waiting(shop_ref: str, biz_item_id: str = "waiting:hall:2") -> dict:
+    """캐치테이블 실시간 웨이팅 현황을 스캔합니다."""
+    spec = parse_catchtable_waiting_spec(biz_item_id)
+    resolved_ref = get_catchtable_shop_ref(shop_ref)
+    headers = {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Origin': 'https://app.catchtable.co.kr',
+        'Referer': 'https://app.catchtable.co.kr/'
+    }
+    url = f"https://ct-api.catchtable.co.kr/reservation-api/v1/waiting-shops/{resolved_ref}"
+    params = {"withTable": "true", "withWaitingsStatus": "true", "withPersonOption": "true"}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=8)
+        if resp.status_code == 200:
+            data = (resp.json() or {}).get("data") or {}
+            return evaluate_catchtable_waiting_data(data, scope=spec.get("scope", "hall"), min_teams=spec.get("min_teams", 2))
+    except Exception as e:
+        logger.warning(f"캐치테이블 웨이팅 조회 오류 ({shop_ref}): {e}")
+    return {"is_open": False, "korean_text": "웨이팅 정보 조회 실패", "state_key": ""}
+
+
+def scan_catchtable_slots(shop_ref: str, max_results: int = 5, target_date: str = "all") -> list:
     """캐치테이블 실시간 예약 가능 날짜 및 인원 수를 스캔합니다."""
     resolved_ref = get_catchtable_shop_ref(shop_ref)
     headers = {
@@ -510,6 +654,8 @@ def scan_catchtable_slots(shop_ref: str, max_results: int = 5) -> list:
             for item in data:
                 if item.get("availableStatus") == "AVAILABLE":
                     dt_str = item.get("date")  # e.g. "2026-10-28"
+                    if target_date and target_date != "all" and not str(target_date).startswith("waiting") and dt_str != target_date:
+                        continue
                     p_counts = item.get("availablePersonCounts") or []
                     p_text = f"가능 인원: {min(p_counts)}~{max(p_counts)}명" if p_counts else "예약 가능"
                     try:
@@ -681,9 +827,44 @@ def run_supabase_multi_user():
                 continue
 
             if biz_type == 88:
+                wait_spec = parse_catchtable_waiting_spec(item_id)
+                if wait_spec.get("is_waiting"):
+                    logger.info(f"🔎 [캐치테이블 원격 웨이팅] 스캔 시작: [{biz_name}] - {item_name} (shopRef: {biz_id})")
+                    w_res = scan_catchtable_waiting(biz_id, item_id)
+                    is_open = w_res.get("is_open", False)
+                    current_keys = [w_res["korean_text"]] if is_open else []
+                    was_open = len(last_slots) > 0
+
+                    if is_open and (not was_open or force_notify):
+                        logger.info(f"🎉 [캐치테이블 원격 웨이팅 오픈!] [{biz_name}] {w_res['korean_text']}")
+                        title = f"🏃 [원격 웨이팅 오픈!] {biz_name}"
+                        body = f"{w_res['korean_text']}\n지금 즉시 캐치테이블 앱에서 웨이팅을 등록하세요!"
+                        if push_sub:
+                            send_web_push(push_sub, title, body, naver_url)
+                        else:
+                            logger.warning(f"⚠️ [{biz_name}] 푸시 구독 토큰이 등록되지 않은 기기입니다.")
+                        update_reservation_secure(headers, res_id, {
+                            "last_slots": current_keys,
+                            "updated_at": now_iso
+                        })
+                    elif is_open:
+                        logger.info(f"ℹ️ [캐치테이블 원격 웨이팅] [{biz_name}] 원격 웨이팅 가능 상태 유지 중 ({w_res['korean_text']})")
+                        update_reservation_secure(headers, res_id, {
+                            "last_slots": current_keys,
+                            "updated_at": now_iso
+                        })
+                    else:
+                        logger.info(f"❌ [캐치테이블 원격 웨이팅] [{biz_name}] {w_res.get('korean_text')}")
+                        payload = {"updated_at": now_iso}
+                        if last_slots:
+                            logger.info(f"🔄 [캐치테이블 원격 웨이팅] [{biz_name}] 원격 웨이팅이 비활성화되어 상태를 리셋합니다.")
+                            payload["last_slots"] = []
+                        update_reservation_secure(headers, res_id, payload)
+                    continue
+
                 # 캐치테이블 레스토랑 예약 모니터링
                 logger.info(f"🔎 [캐치테이블] 스캔 시작: [{biz_name}] (shopRef: {biz_id})")
-                top_slots = scan_catchtable_slots(biz_id, max_results=3)
+                top_slots = scan_catchtable_slots(biz_id, max_results=3, target_date=item_id)
                 current_slot_keys = [s["korean_text"] for s in top_slots]
                 is_changed = (current_slot_keys != last_slots)
 

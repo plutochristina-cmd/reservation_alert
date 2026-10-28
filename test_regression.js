@@ -77,6 +77,12 @@ async function runAllTests() {
       { encoding: 'utf-8' }
     ).trim();
     assert(deadlineFilterCheck === 'FILTER_OK', "네이버 매장별 마감 규칙(RI03 1시간 전 마감) + 5분 안전 버퍼(10:04 -> 10:30/11:00 제외, 10:56 -> 12:00 제외) 검증 통과");
+
+    const ctWaitingCheck = execSync(
+      'python -c "import scheduler; s1 = scheduler.parse_catchtable_waiting_spec(\'waiting:hall:2\'); assert s1[\'is_waiting\'] and s1[\'scope\']==\'hall\' and s1[\'min_teams\']==2; mock_under = {\'tableStatus\': {\'totalTeamCount\': 1, \'operationInfo\': {\'isWaitingAvailable\': False, \'waitingDisabledReason\': \'UNDER_AVAILABLE_TEAMS\', \'possibleWaitingAtLeastCount\': 2}, \'tableCurrentStatus\': [{\'tableName\': \'매장 식사\', \'isTakeOut\': False, \'tableOperationStatus\': \'OPEN\', \'teamCount\': 1}]}}; r1 = scheduler.evaluate_catchtable_waiting_data(mock_under, \'hall\', 2); assert not r1[\'is_open\']; mock_open = {\'tableStatus\': {\'totalTeamCount\': 3, \'operationInfo\': {\'isWaitingAvailable\': True, \'waitingDisabledReason\': None, \'possibleWaitingAtLeastCount\': 2}, \'tableCurrentStatus\': [{\'tableName\': \'매장 식사\', \'isTakeOut\': False, \'tableOperationStatus\': \'OPEN\', \'teamCount\': 2}, {\'tableName\': \'포장\', \'isTakeOut\': True, \'tableOperationStatus\': \'OPEN\', \'teamCount\': 1}]}}; r2 = scheduler.evaluate_catchtable_waiting_data(mock_open, \'hall\', 2); assert r2[\'is_open\'] and r2[\'hall_teams\']==2; print(\'WAITING_OK\')"',
+      { encoding: 'utf-8' }
+    ).trim();
+    assert(ctWaitingCheck === 'WAITING_OK', "캐치테이블 원격 웨이팅(홀 2팀 이상 조건 달성 및 UNDER_AVAILABLE_TEAMS 차단) 판별 로직 검증 통과");
   } catch (e) {
     assert(false, `파이썬 구문 오류: ${e.message}`);
   }
